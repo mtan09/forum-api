@@ -1,0 +1,140 @@
+-- ============================================================
+-- forum schema — works on any Postgres 13+ (local, Neon, ...)
+-- gen_random_uuid() is built into Postgres 13+, no extension needed
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS userdata (
+  id          TEXT PRIMARY KEY,        -- app-generated UUID string
+  username    TEXT NOT NULL UNIQUE,
+  avatar_url  TEXT,
+  bio         TEXT,
+  header_url  TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Email/password credentials, separate from public profile data.
+-- Emails are stored lowercased by the API.
+CREATE TABLE IF NOT EXISTS auth_credentials (
+  user_id       TEXT PRIMARY KEY REFERENCES userdata(id) ON DELETE CASCADE,
+  email         TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS general_topics (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                        TEXT NOT NULL,
+  slug                        TEXT NOT NULL UNIQUE,
+  spectrum_left_label         TEXT,
+  spectrum_right_label        TEXT,
+  spectrum_left_description   TEXT,
+  spectrum_right_description  TEXT,
+  importance                  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS subtopics (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  general_topic_id  UUID REFERENCES general_topics(id) ON DELETE CASCADE,
+  title             TEXT NOT NULL,
+  short_summary     TEXT,
+  long_summary      TEXT,
+  keywords          TEXT[] DEFAULT '{}',
+  volume            INTEGER DEFAULT 0,
+  public_position   FLOAT CHECK (public_position BETWEEN 0 AND 1),
+  image_urls        TEXT[] DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS posts (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  content           TEXT,
+  media_url         TEXT,
+  general_topic_id  UUID REFERENCES general_topics(id),
+  position          FLOAT CHECK (position BETWEEN 0 AND 1),
+  upvotes           INTEGER DEFAULT 0,
+  downvotes         INTEGER DEFAULT 0,
+  commentcount      INTEGER DEFAULT 0,
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS articles (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  url                 TEXT UNIQUE NOT NULL,
+  content_hash        TEXT UNIQUE,
+  title               TEXT,
+  source              TEXT,
+  content             TEXT,
+  media               TEXT,
+  political_lean      FLOAT CHECK (political_lean BETWEEN 0 AND 1),
+  political_relevance FLOAT CHECK (political_relevance BETWEEN 0 AND 1),
+  lean_confidence     FLOAT CHECK (lean_confidence BETWEEN 0 AND 1),
+  content_type        TEXT CHECK (content_type IN ('news_report', 'opinion', 'analysis', 'factual_report')),
+  lean_signals        TEXT[] DEFAULT '{}',
+  general_topic_id    UUID REFERENCES general_topics(id),
+  subtopic_id         UUID REFERENCES subtopics(id),
+  published_at        TIMESTAMPTZ,
+  status              TEXT DEFAULT 'ready' CHECK (status IN ('pending', 'ready')),
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS comments (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  post_id           UUID REFERENCES posts(id) ON DELETE CASCADE,
+  parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE,
+  content           TEXT NOT NULL,
+  created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS votes (
+  user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  post_id    UUID REFERENCES posts(id) ON DELETE CASCADE,
+  direction  TEXT NOT NULL CHECK (direction IN ('up', 'down')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, post_id)
+);
+
+CREATE TABLE IF NOT EXISTS bookmarks (
+  user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  post_id    UUID REFERENCES posts(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, post_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_positions (
+  user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  topic_id   UUID REFERENCES general_topics(id) ON DELETE CASCADE,
+  position   FLOAT NOT NULL CHECK (position BETWEEN 0 AND 1),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, topic_id)
+);
+
+-- ============================================================
+-- Indexes
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_posts_topic      ON posts(general_topic_id);
+CREATE INDEX IF NOT EXISTS idx_posts_created    ON posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_posts_user       ON posts(user_id);
+CREATE INDEX IF NOT EXISTS idx_articles_topic   ON articles(general_topic_id);
+CREATE INDEX IF NOT EXISTS idx_articles_status  ON articles(status);
+CREATE INDEX IF NOT EXISTS idx_articles_created ON articles(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_comments_post    ON comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_comments_parent  ON comments(parent_comment_id);
+CREATE INDEX IF NOT EXISTS idx_votes_post       ON votes(post_id);
+
+-- ============================================================
+-- Seed: general_topics
+-- UUIDs preserved from the existing app so profile.tsx keeps working
+-- until Phase 3 migration
+-- ============================================================
+
+INSERT INTO general_topics (id, name, slug, importance) VALUES
+  ('8c4a1a64-d3b6-4eb2-b86c-d9af397cdb1e', 'Elections & Government', 'elections',     7),
+  ('b2341048-0108-450d-91ae-d0f509f6f574', 'Foreign Policy & Defense','foreign-policy',5),
+  ('f289ef45-488d-46cf-aad2-d045453f4875', 'Economy & Jobs',          'economy',       6),
+  ('49abf187-8b6b-419d-a093-a76dc7104819', 'Tech & Innovation',       'tech',          4),
+  ('d2cfb810-94f0-4446-982c-38ad27585bca', 'Immigration & Border',    'immigration',   6),
+  ('2e6042ef-4598-42a8-8624-1eb961845cbd', 'Health & Environment',    'health',        5),
+  ('95f37b29-a5f9-432b-a411-b5ba1e16a493', 'Rights & Freedoms',       'rights',        5)
+ON CONFLICT (id) DO NOTHING;
