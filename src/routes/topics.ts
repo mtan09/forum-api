@@ -22,6 +22,22 @@ topics.get('/', async (c) => {
   return c.json(result)
 })
 
+// GET /topics/hot — auto-clustered hot topics for the feed carousel,
+// hottest first (score = corroborated articles × outlet spread + posts)
+topics.get('/hot', async (c) => {
+  const limit = Math.min(Number(c.req.query('limit')) || 8, 20)
+  const result = await query(
+    `SELECT id, title, short_summary, keywords, volume, public_position, score
+     FROM subtopics
+     WHERE cluster_key IS NOT NULL AND score > 0
+       AND updated_at > NOW() - INTERVAL '7 days'
+     ORDER BY score DESC, updated_at DESC
+     LIMIT $1`,
+    [limit]
+  )
+  return c.json(result.rows)
+})
+
 // GET /topics/subtopics/:id — subtopic detail plus its articles
 topics.get('/subtopics/:id', async (c) => {
   const id = c.req.param('id')

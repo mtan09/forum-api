@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { Hono } from 'hono'
 import pool from '../db'
 import { hashPassword, issueToken, verifyPassword } from '../lib/auth'
+import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
 
 const auth = new Hono<AppEnv>()
@@ -83,6 +84,34 @@ auth.post('/login', async (c) => {
   const { password_hash: _hash, ...user } = row
   const token = await issueToken(user.id)
   return c.json({ token, user })
+})
+
+// POST /auth/change-password  { current_password, new_password }
+auth.post('/change-password', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const currentPassword = String(body?.current_password ?? '')
+  const newPassword = String(body?.new_password ?? '')
+
+  if (newPassword.length < 6) {
+    return c.json({ error: 'New password must be at least 6 characters.' }, 400)
+  }
+
+  const result = await pool.query(
+    'SELECT password_hash FROM auth_credentials WHERE user_id = $1',
+    [c.get('userId')]
+  )
+  const row = result.rows[0]
+  const valid = row ? await verifyPassword(currentPassword, row.password_hash) : false
+  if (!valid) {
+    return c.json({ error: 'Current password is incorrect.' }, 401)
+  }
+
+  const newHash = await hashPassword(newPassword)
+  await pool.query('UPDATE auth_credentials SET password_hash = $1 WHERE user_id = $2', [
+    newHash,
+    c.get('userId'),
+  ])
+  return c.json({ ok: true })
 })
 
 export default auth

@@ -1,32 +1,63 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
+import { matchTopic } from '../ingest/topics'
 import { requireAuth } from '../middleware/auth'
+import { scorePost } from '../scoring/score'
 import type { AppEnv } from '../types'
 
 const posts = new Hono<AppEnv>()
 
 const POST_SELECT = `
   SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
-         p.upvotes, p.downvotes, p.commentcount, p.created_at,
+         p.position_confidence, p.position_signals, p.scorer_version,
+         p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
          u.username, u.avatar_url,
-         v.direction AS my_vote
+         v.direction AS my_vote,
+         EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
   FROM posts p
   JOIN userdata u ON u.id = p.user_id
   LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
 `
 
-// GET /posts?topic_id=X&limit=50&offset=0 — newest first, includes author + caller's vote
+// Rows authored by someone the caller has blocked never leave the API
+const NOT_BLOCKED = `NOT EXISTS(
+  SELECT 1 FROM blocks bl WHERE bl.blocker_id = $1 AND bl.blocked_id = p.user_id
+)`
+
+// Author-selected hashtags plus any #tags typed inline; normalized to
+// bare lowercase slugs, deduped, capped.
+function normalizeHashtags(provided: unknown, content: string): string[] {
+  const raw: string[] = []
+  if (Array.isArray(provided)) raw.push(...provided.map(String))
+  raw.push(...(content.match(/#([A-Za-z0-9_]{2,30})/g) ?? []))
+  const tags: string[] = []
+  for (const entry of raw) {
+    const tag = entry.replace(/^#/, '').toLowerCase().replace(/[^a-z0-9_]/g, '')
+    if (tag.length >= 2 && tag.length <= 30 && !tags.includes(tag)) tags.push(tag)
+    if (tags.length >= 8) break
+  }
+  return tags
+}
+
+// GET /posts?topic_id=X&user_id=Y&limit=50&offset=0 — newest first,
+// includes author + caller's vote
 posts.get('/', requireAuth, async (c) => {
   const topicId = c.req.query('topic_id')
+  const authorId = c.req.query('user_id')
   const limit = Math.min(Number(c.req.query('limit')) || 100, 100)
   const offset = Math.max(Number(c.req.query('offset')) || 0, 0)
 
   const params: unknown[] = [c.get('userId')]
-  let where = ''
+  const conditions: string[] = [NOT_BLOCKED]
   if (topicId) {
     params.push(topicId)
-    where = `WHERE p.general_topic_id = $${params.length}`
+    conditions.push(`p.general_topic_id = $${params.length}`)
   }
+  if (authorId) {
+    params.push(authorId)
+    conditions.push(`p.user_id = $${params.length}`)
+  }
+  const where = `WHERE ${conditions.join(' AND ')}`
   params.push(limit, offset)
 
   const result = await query(
@@ -38,25 +69,33 @@ posts.get('/', requireAuth, async (c) => {
   return c.json(result.rows)
 })
 
-// POST /posts  { content, media_url?, general_topic_id?, position? }
+// POST /posts  { content, media_url?, hashtags?: string[] }
+// Hashtags are author-selected (plus inline #tags in the text). The
+// general topic is derived server-side as background metadata, and the
+// spectrum position is computed by the deterministic scorer — NULL when
+// the text doesn't clear the confidence gate. Client-supplied positions
+// are ignored.
 posts.post('/', requireAuth, async (c) => {
   const body = await c.req.json().catch(() => null)
   const content = String(body?.content ?? '').trim()
   const mediaUrl = body?.media_url ? String(body.media_url) : null
-  const topicId = body?.general_topic_id ? String(body.general_topic_id) : null
-  const position = body?.position === undefined ? 0.5 : Number(body.position)
 
   if (!content && !mediaUrl) {
     return c.json({ error: 'Post needs text or an image.' }, 400)
   }
-  if (!Number.isFinite(position) || position < 0 || position > 1) {
-    return c.json({ error: 'position must be between 0 and 1.' }, 400)
-  }
+
+  const hashtags = normalizeHashtags(body?.hashtags, content)
+  const score = scorePost(content)
+  const topic = await matchTopic(`${content} ${hashtags.join(' ')}`)
 
   const inserted = await query(
-    `INSERT INTO posts (user_id, content, media_url, general_topic_id, position)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-    [c.get('userId'), content, mediaUrl, topicId, position]
+    `INSERT INTO posts (user_id, content, media_url, general_topic_id, hashtags,
+                        position, position_confidence, position_signals, scorer_version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+    [
+      c.get('userId'), content, mediaUrl, topic.generalTopicId, hashtags,
+      score.position, score.confidence, score.signals, score.scorer_version,
+    ]
   )
   const result = await query(`${POST_SELECT} WHERE p.id = $2`, [
     c.get('userId'),

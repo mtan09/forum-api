@@ -45,16 +45,21 @@ CREATE TABLE IF NOT EXISTS subtopics (
 );
 
 CREATE TABLE IF NOT EXISTS posts (
-  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id           TEXT REFERENCES userdata(id) ON DELETE CASCADE,
-  content           TEXT,
-  media_url         TEXT,
-  general_topic_id  UUID REFERENCES general_topics(id),
-  position          FLOAT CHECK (position BETWEEN 0 AND 1),
-  upvotes           INTEGER DEFAULT 0,
-  downvotes         INTEGER DEFAULT 0,
-  commentcount      INTEGER DEFAULT 0,
-  created_at        TIMESTAMPTZ DEFAULT NOW()
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  content             TEXT,
+  media_url           TEXT,
+  general_topic_id    UUID REFERENCES general_topics(id),
+  -- position is set by the scorer at creation; NULL = confidence gate
+  -- not met, the app shows no spectrum placement (see src/scoring/)
+  position            FLOAT CHECK (position BETWEEN 0 AND 1),
+  position_confidence FLOAT CHECK (position_confidence BETWEEN 0 AND 1),
+  position_signals    TEXT[] DEFAULT '{}',
+  scorer_version      TEXT,
+  upvotes             INTEGER DEFAULT 0,
+  downvotes           INTEGER DEFAULT 0,
+  commentcount        INTEGER DEFAULT 0,
+  created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -70,6 +75,11 @@ CREATE TABLE IF NOT EXISTS articles (
   lean_confidence     FLOAT CHECK (lean_confidence BETWEEN 0 AND 1),
   content_type        TEXT CHECK (content_type IN ('news_report', 'opinion', 'analysis', 'factual_report')),
   lean_signals        TEXT[] DEFAULT '{}',
+  source_lean         FLOAT CHECK (source_lean BETWEEN 0 AND 1),
+  scorer_version      TEXT,
+  upvotes             INTEGER DEFAULT 0,
+  downvotes           INTEGER DEFAULT 0,
+  commentcount        INTEGER DEFAULT 0,
   general_topic_id    UUID REFERENCES general_topics(id),
   subtopic_id         UUID REFERENCES subtopics(id),
   published_at        TIMESTAMPTZ,
@@ -77,12 +87,38 @@ CREATE TABLE IF NOT EXISTS articles (
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Daily debates auto-picked from published story clusters: the biggest
+-- story and the most contested one. Users pin a position, then see the
+-- community distribution and discuss in a shared thread.
+CREATE TABLE IF NOT EXISTS debates (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  debate_date DATE NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('biggest', 'contested', 'trending')),
+  subtopic_id UUID REFERENCES subtopics(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (debate_date, subtopic_id)
+);
+
+CREATE TABLE IF NOT EXISTS debate_votes (
+  user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  debate_id  UUID REFERENCES debates(id) ON DELETE CASCADE,
+  position   FLOAT NOT NULL CHECK (position BETWEEN 0 AND 1),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, debate_id)
+);
+
+-- A comment belongs to a post, an article, or a debate thread
 CREATE TABLE IF NOT EXISTS comments (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id           TEXT REFERENCES userdata(id) ON DELETE CASCADE,
   post_id           UUID REFERENCES posts(id) ON DELETE CASCADE,
+  article_id        UUID REFERENCES articles(id) ON DELETE CASCADE,
+  debate_id         UUID REFERENCES debates(id) ON DELETE CASCADE,
   parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE,
   content           TEXT NOT NULL,
+  upvotes           INTEGER DEFAULT 0,
+  downvotes         INTEGER DEFAULT 0,
   created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -94,12 +130,58 @@ CREATE TABLE IF NOT EXISTS votes (
   PRIMARY KEY (user_id, post_id)
 );
 
-CREATE TABLE IF NOT EXISTS bookmarks (
+CREATE TABLE IF NOT EXISTS article_votes (
   user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
-  post_id    UUID REFERENCES posts(id) ON DELETE CASCADE,
+  article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+  direction  TEXT NOT NULL CHECK (direction IN ('up', 'down')),
   created_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (user_id, post_id)
+  PRIMARY KEY (user_id, article_id)
 );
+
+CREATE TABLE IF NOT EXISTS comment_votes (
+  user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
+  comment_id UUID REFERENCES comments(id) ON DELETE CASCADE,
+  direction  TEXT NOT NULL CHECK (direction IN ('up', 'down')),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (user_id, comment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_comment_votes_comment ON comment_votes(comment_id);
+
+-- A bookmark saves a post OR an article — exactly one per row
+CREATE TABLE IF NOT EXISTS bookmarks (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  post_id    UUID REFERENCES posts(id) ON DELETE CASCADE,
+  article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  CHECK ((post_id IS NULL) <> (article_id IS NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_user_post
+  ON bookmarks (user_id, post_id) WHERE post_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_user_article
+  ON bookmarks (user_id, article_id) WHERE article_id IS NOT NULL;
+
+-- Moderation: reports (one live report per reporter per target) and
+-- one-directional blocks (enforced in read queries, not triggers)
+CREATE TABLE IF NOT EXISTS reports (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  reporter_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('post', 'article', 'comment', 'user')),
+  target_id   TEXT NOT NULL,
+  reason      TEXT NOT NULL CHECK (reason IN ('spam', 'harassment', 'misinformation', 'hate', 'other')),
+  detail      TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (reporter_id, target_kind, target_id)
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  blocked_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (blocker_id, blocked_id),
+  CHECK (blocker_id <> blocked_id)
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_id);
 
 CREATE TABLE IF NOT EXISTS user_positions (
   user_id    TEXT REFERENCES userdata(id) ON DELETE CASCADE,
@@ -120,8 +202,10 @@ CREATE INDEX IF NOT EXISTS idx_articles_topic   ON articles(general_topic_id);
 CREATE INDEX IF NOT EXISTS idx_articles_status  ON articles(status);
 CREATE INDEX IF NOT EXISTS idx_articles_created ON articles(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_comments_post    ON comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_comments_article ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_comments_parent  ON comments(parent_comment_id);
 CREATE INDEX IF NOT EXISTS idx_votes_post       ON votes(post_id);
+CREATE INDEX IF NOT EXISTS idx_article_votes_article ON article_votes(article_id);
 
 -- ============================================================
 -- Seed: general_topics

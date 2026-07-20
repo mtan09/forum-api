@@ -34,6 +34,12 @@ const POSTS = [
     content: 'Fed held rates again. Sticky services inflation is the whole story — goods prices normalized a year ago.' },
   { user: 1, topic: TOPICS.health, position: 0.9,
     content: 'Grid interconnection queues are the quiet bottleneck of the energy transition. Five-year waits for approved projects is a policy failure, not an engineering one.' },
+  // Two clearly partisan posts so the scored-spectrum display is visible
+  // in dev (the neutral posts above correctly gate to no placement)
+  { user: 2, topic: TOPICS.rights, position: 0.1,
+    content: 'We need commonsense gun reform now. The gun lobby keeps blocking gun safety laws while assault weapons stay on our streets. Voting rights and racial justice are on the ballot too.' },
+  { user: 0, topic: TOPICS.immigration, position: 0.9,
+    content: 'Open borders policies created this border crisis. Illegal aliens are straining services while the radical left pushes handouts. Election integrity and law and order matter.' },
 ]
 
 const COMMENTS = [

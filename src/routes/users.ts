@@ -54,31 +54,261 @@ users.patch('/me', requireAuth, async (c) => {
   }
 })
 
-// GET /users/me/positions — per-topic political positions
-users.get('/me/positions', requireAuth, async (c) => {
+// GET /users/me/spectrum — the user's single political placement, computed
+// from their actual activity (never self-declared):
+//   - each of their scored posts contributes its position at weight 3
+//   - each upvote contributes the voted content's lean at weight 1
+//   - each downvote contributes the MIRROR of the content's lean (1 - lean)
+//     at weight 1 — disagreeing with a right-leaning item is a left signal
+// Votes on their own posts are excluded; unscored content contributes
+// nothing. position = Σ(weight·value) / Σweight, 0.5 with no activity.
+const POST_WEIGHT = 3
+const VOTE_WEIGHT = 1
+
+async function computeSpectrum(userId: string) {
+  const [ownPosts, postVotes, articleVotes] = await Promise.all([
+    query('SELECT position FROM posts WHERE user_id = $1 AND position IS NOT NULL', [userId]),
+    query(
+      `SELECT v.direction, p.position AS lean
+       FROM votes v JOIN posts p ON p.id = v.post_id
+       WHERE v.user_id = $1 AND p.user_id <> $1 AND p.position IS NOT NULL`,
+      [userId]
+    ),
+    query(
+      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean
+       FROM article_votes v JOIN articles a ON a.id = v.article_id
+       WHERE v.user_id = $1 AND COALESCE(a.political_lean, a.source_lean) IS NOT NULL`,
+      [userId]
+    ),
+  ])
+
+  let weightedSum = 0
+  let totalWeight = 0
+  let upvotes = 0
+  let downvotes = 0
+
+  for (const row of ownPosts.rows) {
+    weightedSum += POST_WEIGHT * Number(row.position)
+    totalWeight += POST_WEIGHT
+  }
+  for (const row of [...postVotes.rows, ...articleVotes.rows]) {
+    const lean = Number(row.lean)
+    if (row.direction === 'up') {
+      weightedSum += VOTE_WEIGHT * lean
+      upvotes++
+    } else {
+      weightedSum += VOTE_WEIGHT * (1 - lean)
+      downvotes++
+    }
+    totalWeight += VOTE_WEIGHT
+  }
+
+  const position = totalWeight > 0 ? Number((weightedSum / totalWeight).toFixed(3)) : 0.5
+  return {
+    position,
+    sample: { posts: ownPosts.rows.length, upvotes, downvotes },
+  }
+}
+
+users.get('/me/spectrum', requireAuth, async (c) => {
+  return c.json(await computeSpectrum(c.get('userId')!))
+})
+
+// GET /users/me/spectrum/history — the same number, given a time axis:
+// cumulative placement as of each month-end for the last 6 months, plus
+// today. Same weights as computeSpectrum, replayed in insertion order,
+// so the trail is exactly where /me/spectrum would have pointed then.
+users.get('/me/spectrum/history', requireAuth, async (c) => {
+  const userId = c.get('userId')
+  const [ownPosts, postVotes, articleVotes] = await Promise.all([
+    query(
+      'SELECT position AS value, created_at FROM posts WHERE user_id = $1 AND position IS NOT NULL',
+      [userId]
+    ),
+    query(
+      `SELECT v.direction, p.position AS lean, v.created_at
+       FROM votes v JOIN posts p ON p.id = v.post_id
+       WHERE v.user_id = $1 AND p.user_id <> $1 AND p.position IS NOT NULL`,
+      [userId]
+    ),
+    query(
+      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean, v.created_at
+       FROM article_votes v JOIN articles a ON a.id = v.article_id
+       WHERE v.user_id = $1 AND COALESCE(a.political_lean, a.source_lean) IS NOT NULL`,
+      [userId]
+    ),
+  ])
+
+  type Event = { t: number; weight: number; value: number }
+  const events: Event[] = [
+    ...ownPosts.rows.map((r) => ({
+      t: new Date(r.created_at).getTime(),
+      weight: POST_WEIGHT,
+      value: Number(r.value),
+    })),
+    ...[...postVotes.rows, ...articleVotes.rows].map((r) => ({
+      t: new Date(r.created_at).getTime(),
+      weight: VOTE_WEIGHT,
+      value: r.direction === 'up' ? Number(r.lean) : 1 - Number(r.lean),
+    })),
+  ].sort((a, b) => a.t - b.t)
+
+  // Cut points: the last 6 month-ends, then now
+  const now = new Date()
+  const cuts: { label: string; t: number }[] = []
+  for (let back = 6; back >= 1; back--) {
+    const end = new Date(now.getFullYear(), now.getMonth() - back + 1, 1)
+    cuts.push({
+      label: new Date(now.getFullYear(), now.getMonth() - back, 1)
+        .toLocaleDateString('en-US', { month: 'short' }),
+      t: end.getTime(),
+    })
+  }
+  cuts.push({ label: 'Now', t: now.getTime() + 1 })
+
+  const points: { label: string; position: number; samples: number }[] = []
+  let i = 0
+  let weightedSum = 0
+  let totalWeight = 0
+  let samples = 0
+  for (const cut of cuts) {
+    while (i < events.length && events[i].t < cut.t) {
+      weightedSum += events[i].weight * events[i].value
+      totalWeight += events[i].weight
+      samples++
+      i++
+    }
+    if (samples > 0) {
+      points.push({
+        label: cut.label,
+        position: Number((weightedSum / totalWeight).toFixed(3)),
+        samples,
+      })
+    }
+  }
+  return c.json({ points })
+})
+
+// POST /users/:id/block — stop seeing this user's posts and comments
+users.post('/:id/block', requireAuth, async (c) => {
+  const targetId = c.req.param('id')
+  if (targetId === c.get('userId')) {
+    return c.json({ error: 'You cannot block yourself.' }, 400)
+  }
+  try {
+    await query(
+      'INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [c.get('userId'), targetId]
+    )
+  } catch (err: any) {
+    if (err?.code === '23503') return c.json({ error: 'User not found' }, 404)
+    throw err
+  }
+  return c.json({ blocked: true })
+})
+
+// DELETE /users/:id/block — unblock
+users.delete('/:id/block', requireAuth, async (c) => {
+  await query('DELETE FROM blocks WHERE blocker_id = $1 AND blocked_id = $2', [
+    c.get('userId'),
+    c.req.param('id'),
+  ])
+  return c.json({ blocked: false })
+})
+
+// GET /users/me/blocks — who the caller has blocked, newest first
+users.get('/me/blocks', requireAuth, async (c) => {
   const result = await query(
-    'SELECT topic_id, position, updated_at FROM user_positions WHERE user_id = $1',
+    `SELECT u.id, u.username, u.avatar_url, u.bio, b.created_at AS blocked_at
+     FROM blocks b JOIN userdata u ON u.id = b.blocked_id
+     WHERE b.blocker_id = $1
+     ORDER BY b.created_at DESC`,
     [c.get('userId')]
   )
   return c.json(result.rows)
 })
 
-// POST /users/me/positions  { topic_id, position } — upsert
-users.post('/me/positions', requireAuth, async (c) => {
-  const body = await c.req.json().catch(() => null)
-  const topicId = String(body?.topic_id ?? '')
-  const position = Number(body?.position)
-  if (!topicId || !Number.isFinite(position) || position < 0 || position > 1) {
-    return c.json({ error: 'topic_id and position (0–1) are required.' }, 400)
-  }
+// GET /users/me/posts — the caller's own posts, newest first
+users.get('/me/posts', requireAuth, async (c) => {
+  const userId = c.get('userId')
   const result = await query(
-    `INSERT INTO user_positions (user_id, topic_id, position, updated_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (user_id, topic_id) DO UPDATE SET position = $3, updated_at = NOW()
-     RETURNING topic_id, position, updated_at`,
-    [c.get('userId'), topicId, position]
+    `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
+            p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+            u.username, u.avatar_url,
+            v.direction AS my_vote,
+            EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
+     FROM posts p
+     JOIN userdata u ON u.id = p.user_id
+     LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
+     WHERE p.user_id = $1
+     ORDER BY p.created_at DESC
+     LIMIT 100`,
+    [userId]
   )
-  return c.json(result.rows[0])
+  return c.json(result.rows)
+})
+
+// GET /users/me/comments — the caller's comments with enough parent
+// context (title + kind) for the profile list to link back to the thread
+users.get('/me/comments', requireAuth, async (c) => {
+  const result = await query(
+    `SELECT c.id, c.content, c.created_at, c.upvotes, c.downvotes,
+            c.post_id, c.article_id, c.parent_comment_id,
+            CASE WHEN c.article_id IS NOT NULL THEN 'article' ELSE 'post' END AS parent_kind,
+            COALESCE(a.title, LEFT(p.content, 80)) AS parent_title
+     FROM comments c
+     LEFT JOIN posts p ON p.id = c.post_id
+     LEFT JOIN articles a ON a.id = c.article_id
+     WHERE c.user_id = $1
+     ORDER BY c.created_at DESC
+     LIMIT 100`,
+    [c.get('userId')]
+  )
+  return c.json(result.rows)
+})
+
+// GET /users/me/upvoted — posts and articles the caller upvoted, newest
+// vote first, in the same mixed shape as GET /bookmarks
+users.get('/me/upvoted', requireAuth, async (c) => {
+  const userId = c.get('userId')
+  const [posts, articles] = await Promise.all([
+    query(
+      `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
+              p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+              u.username, u.avatar_url,
+              'up' AS my_vote,
+              EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
+              v.created_at AS voted_at
+       FROM votes v
+       JOIN posts p ON p.id = v.post_id
+       JOIN userdata u ON u.id = p.user_id
+       WHERE v.user_id = $1 AND v.direction = 'up'`,
+      [userId]
+    ),
+    query(
+      `SELECT a.*, 'up' AS my_vote,
+              EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+              v.created_at AS voted_at
+       FROM article_votes v
+       JOIN articles a ON a.id = v.article_id
+       WHERE v.user_id = $1 AND v.direction = 'up'`,
+      [userId]
+    ),
+  ])
+
+  const items = [
+    ...posts.rows.map((row) => ({ kind: 'post' as const, voted_at: row.voted_at, item: row })),
+    ...articles.rows.map((row) => ({ kind: 'article' as const, voted_at: row.voted_at, item: row })),
+  ].sort((x, y) => new Date(y.voted_at).getTime() - new Date(x.voted_at).getTime())
+
+  return c.json(items)
+})
+
+// DELETE /users/me — permanently delete the account; posts, comments and
+// votes cascade via foreign keys.
+users.delete('/me', requireAuth, async (c) => {
+  await query('DELETE FROM userdata WHERE id = $1', [c.get('userId')])
+  return c.json({ ok: true })
 })
 
 // GET /users?ids=a,b,c — batch public profiles
@@ -95,14 +325,24 @@ users.get('/', requireAuth, async (c) => {
   return c.json(result.rows)
 })
 
-// GET /users/:id — public profile
+// GET /users/:id — public profile (+ whether the caller has them blocked)
 users.get('/:id', requireAuth, async (c) => {
   const result = await query(
-    `SELECT ${PUBLIC_USER_COLS} FROM userdata WHERE id = $1`,
-    [c.req.param('id')]
+    `SELECT ${PUBLIC_USER_COLS},
+            EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id = $2 AND b.blocked_id = id) AS blocked_by_me
+     FROM userdata WHERE id = $1`,
+    [c.req.param('id'), c.get('userId')]
   )
   if (!result.rows[0]) return c.json({ error: 'User not found' }, 404)
   return c.json(result.rows[0])
+})
+
+// GET /users/:id/spectrum — anyone's computed placement (same math as
+// /me/spectrum; positions are activity-derived and public by design)
+users.get('/:id/spectrum', requireAuth, async (c) => {
+  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [c.req.param('id')])
+  if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
+  return c.json(await computeSpectrum(c.req.param('id')))
 })
 
 export default users
