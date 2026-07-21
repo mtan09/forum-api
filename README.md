@@ -17,7 +17,9 @@ Backend for the forum app (`../forum`). Hono + Postgres, self-managed JWT auth, 
 
 The article feed is real: `src/ingest/` pulls RSS from ~59 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept ~even between left/center/right), extracts full text, dedupes by URL/content hash, gates on political relevance, auto-derives hashtags and a background general topic, scores, and inserts as `ready`. Run once with `npm run ingest`, or set `INGEST_INTERVAL_MINUTES` to refresh on a timer while the server runs.
 
-**Nothing is hand-written.** After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles into stories: greedy leader clustering on keyword-profile similarity, then a union-find merge pass over fixed profiles (so merging can't snowball). Clusters with 3+ articles from 2+ outlets become subtopics — the "hot topics" carousel (`GET /topics/hot`) and their blurb/summary screens are generated **extractively**: the title is a real member headline (preferring outlets nearest the center), the short blurb is a lead sentence, and the long summary quotes one lead per spectrum band ("From the left (…): … / From the center: … / From the right: …"). `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts. Deterministic — no LLM anywhere in the pipeline.
+Publisher data is treated as untrusted. Image selection prefers a feed's canonical enclosure, validates every source with the same URL rules, rejects malformed article-URL-plus-caption metadata, and falls back to a valid page image. Full-text extraction rejects timestamp-heavy video-player/navigation rails from any publisher and falls back to the cleaner RSS text instead, so unrelated video headlines do not pollute scoring or story summaries.
+
+**Nothing is hand-written.** After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles into stories: each article is compared with a fixed founding-story profile, followed by a union-find merge pass over fixed profiles, so a cluster cannot accumulate vocabulary and snowball into unrelated topics. Automatic article membership is rebuilt on every clustering run rather than retaining stale links. Clusters with 3+ articles from 2+ outlets become subtopics — the "hot topics" carousel (`GET /topics/hot`) and their blurb/summary screens are generated **extractively**: the title is a real member headline (preferring outlets nearest the center), the short blurb is a lead sentence, and the long summary quotes one clean, word-boundary-capped lead (260 characters maximum) per spectrum band ("From the left (…): … / From the center: … / From the right: …"). `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts. Deterministic — no LLM anywhere in the pipeline.
 
 **Hashtags** are the organizing layer instead of fixed categories: articles get them auto-extracted from their keywords; users pick their own when posting (`POST /posts` accepts `hashtags[]`, plus inline `#tags` in the text). The 7 general topics still exist silently as background metadata.
 
@@ -52,7 +54,7 @@ npm run ingest                                   # fetch + score real news into 
 
 Dev logins after seeding: `john@example.dev` / `jane@example.dev` / `alice@example.dev`, password `password123` (john is an admin in dev).
 
-`npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
+`npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image validation, extracted-content quality, and bounded summary leads); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
 Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins).
 
@@ -110,6 +112,8 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 - Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`
 - Email: `RESEND_API_KEY`, `EMAIL_FROM`, `LEGAL_CONTACT_EMAIL`
 - Observability: optional `SENTRY_DSN`
+
+TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is removed from the parsed database URL so `pg` cannot silently reinterpret it after a driver upgrade; local hosts remain non-TLS and remote hosts use the configured TLS object.
 
 ## Going to production
 

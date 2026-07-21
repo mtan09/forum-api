@@ -1,7 +1,23 @@
 import { Pool } from 'pg'
 
-const connectionString = process.env.DATABASE_URL
-const isLocal = /localhost|127\.0\.0\.1/.test(connectionString ?? '')
+const rawConnectionString = process.env.DATABASE_URL
+const isLocal = /localhost|127\.0\.0\.1/.test(rawConnectionString ?? '')
+
+// SSL is configured explicitly below. Removing sslmode from the URL avoids
+// pg's compatibility warning and prevents a future driver release from
+// silently changing the meaning of the connection's TLS settings.
+function withoutSslMode(value: string | undefined): string | undefined {
+  if (!value) return value
+  try {
+    const url = new URL(value)
+    url.searchParams.delete('sslmode')
+    return url.href
+  } catch {
+    return value
+  }
+}
+
+const connectionString = withoutSslMode(rawConnectionString)
 
 const pool = new Pool({
   connectionString,

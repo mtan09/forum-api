@@ -18,6 +18,7 @@
 // ============================================================
 
 import { query } from '../db'
+import { looksLikeVideoPlaylistChrome } from './content-quality'
 import { extractKeywords, keywordSimilarity, toHashtags, type Keywords } from './keywords'
 
 const RECENT_DAYS = 7
@@ -27,7 +28,7 @@ const MIN_OUTLETS = 2         // ...from more than one outlet
 const MAX_CLUSTERS = 12
 const POST_MATCH_TERMS = 2    // keyword overlaps for a post to count toward a cluster
 
-type ArticleRow = {
+export type ArticleRow = {
   id: string
   title: string
   content: string
@@ -48,7 +49,7 @@ type Cluster = {
 
 // Site chrome and newsletter prompts that survive text extraction and
 // must never end up in a blurb.
-const JUNK_SENTENCE_RE = /skip to content|sign up|newsletter|your feedback|subscribe|advertisem|getty images|read more|continue reading|min read|^close\b|updated on \w+|published on \w+|^politics\b|watch live|^live updates/i
+const JUNK_SENTENCE_RE = /skip to content|sign up|newsletter|your feedback|subscribe|advertisem|getty images|read more|continue reading|min read|^close\b|updated on \w+|published on \w+|^politics\b|watch live|^live updates|now playing|\bup next\b/i
 
 // Protect abbreviations ("U.S.", "Sen.") from the sentence splitter.
 const shieldDots = (text: string): string =>
@@ -64,17 +65,34 @@ function sentenceSplit(text: string): string[] {
     .filter(Boolean)
 }
 
+function truncateAtWord(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const slice = text.slice(0, Math.max(1, maxChars - 1)).trimEnd()
+  const lastSpace = slice.lastIndexOf(' ')
+  const cut = lastSpace >= Math.floor(maxChars * 0.6) ? slice.slice(0, lastSpace) : slice
+  return `${cut.trimEnd()}…`
+}
+
 // First 1–2 clean sentences, cut at a sentence boundary near maxChars.
-function leadOf(article: ArticleRow, maxChars = 260): string {
+// The final hard cap also handles pages with one giant punctuation-free
+// block of navigation or video-player text.
+export function leadOf(article: ArticleRow, maxChars = 260): string {
+  if (looksLikeVideoPlaylistChrome(article.content)) {
+    return truncateAtWord(article.title, maxChars)
+  }
   const sentences = sentenceSplit(article.content)
     .filter((s) => s.length >= 40 && !JUNK_SENTENCE_RE.test(s))
   let out = ''
   for (const s of sentences) {
+    if (!out && s.length > maxChars) {
+      out = truncateAtWord(s, maxChars)
+      break
+    }
     if (out && (out + ' ' + s).length > maxChars) break
     out = out ? `${out} ${s}` : s
     if (out.length >= maxChars * 0.6) break
   }
-  return out || article.title
+  return truncateAtWord(out || article.title, maxChars)
 }
 
 const centrality = (a: ArticleRow) => Math.abs((a.source_lean ?? 0.5) - 0.5)
@@ -159,11 +177,15 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
   )
 
   // Greedy leader clustering: newest article founds a cluster; each next
-  // article joins the most-similar cluster above threshold or founds its
-  // own. Deterministic given the (fixed) sort order.
+  // article joins the most-similar fixed leader above threshold or founds
+  // its own. Keeping the leader fixed prevents a large cluster's vocabulary
+  // from snowballing until it absorbs unrelated stories.
   const clusters: Cluster[] = []
   for (const article of articles as ArticleRow[]) {
-    const profile = extractKeywords(article.title, article.content)
+    const profileContent = looksLikeVideoPlaylistChrome(article.content)
+      ? article.title
+      : article.content
+    const profile = extractKeywords(article.title, profileContent)
     let best: Cluster | null = null
     let bestSim = 0
     for (const c of clusters) {
@@ -173,7 +195,6 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
     if (best && bestSim >= SIM_THRESHOLD) {
       best.members.push(article)
       best.profiles.push(profile)
-      best.leader = mergedProfile(best.profiles)
     } else {
       clusters.push({ members: [article], profiles: [profile], leader: profile })
     }
@@ -244,6 +265,16 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
   })
 
   const hot = scored.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key)).slice(0, MAX_CLUSTERS)
+
+  // Rebuild automatic membership from scratch. Otherwise articles retain
+  // old subtopic IDs after clusters change and unrelated coverage gradually
+  // accumulates on summary screens.
+  await query(
+    `UPDATE articles SET subtopic_id = NULL
+     WHERE subtopic_id IN (
+       SELECT id FROM subtopics WHERE cluster_key IS NOT NULL
+     )`
+  )
 
   const hotTitles: string[] = []
   for (const { cluster, key, postMatches, score } of hot) {
