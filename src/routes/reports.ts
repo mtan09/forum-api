@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { query } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
 
 const reports = new Hono<AppEnv>()
@@ -11,7 +12,7 @@ const REASONS = new Set(['spam', 'harassment', 'misinformation', 'hate', 'other'
 // POST /reports  { target_kind, target_id, reason, detail? }
 // Re-reporting the same target updates the existing report instead of
 // stacking duplicates — the reporter's latest reason wins.
-reports.post('/', requireAuth, async (c) => {
+reports.post('/', requireAuth, rateLimit({ name: 'report', windowMs: 24 * 60 * 60_000, max: 30 }), async (c) => {
   const body = await c.req.json().catch(() => null)
   const kind = String(body?.target_kind ?? '')
   const targetId = String(body?.target_id ?? '').trim()

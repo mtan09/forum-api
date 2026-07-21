@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
+import { notify } from '../lib/push'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
 
 const comments = new Hono<AppEnv>()
@@ -43,6 +45,7 @@ comments.get('/', requireAuth, async (c) => {
 
   const result = await query(
     `${COMMENT_SELECT} ${where}
+       AND NOT c.hidden
        AND NOT EXISTS(SELECT 1 FROM blocks bl WHERE bl.blocker_id = $1 AND bl.blocked_id = c.user_id)
      ORDER BY c.created_at ASC
      LIMIT $3 OFFSET $4`,
@@ -98,7 +101,7 @@ comments.post('/:id/vote', requireAuth, async (c) => {
 })
 
 // POST /comments  { post_id? | article_id? | debate_id? | parent_comment_id?, content }
-comments.post('/', requireAuth, async (c) => {
+comments.post('/', requireAuth, rateLimit({ name: 'createComment', windowMs: 60 * 60_000, max: 120 }), async (c) => {
   const body = await c.req.json().catch(() => null)
   const content = String(body?.content ?? '').trim()
   const parentId = body?.parent_comment_id ? String(body.parent_comment_id) : null
@@ -140,6 +143,33 @@ comments.post('/', requireAuth, async (c) => {
       c.get('userId'),
       inserted.rows[0].id,
     ])
+
+    // Reply notifications: the parent comment's author (for replies) or the
+    // post's author (for top-level comments on a post). Never self-notify.
+    const me = c.get('userId')
+    const preview = content.length > 120 ? `${content.slice(0, 117)}...` : content
+    const commenter = result.rows[0]?.username ?? 'Someone'
+    if (parentId) {
+      const parentOwner = await query('SELECT user_id FROM comments WHERE id = $1', [parentId])
+      const ownerId = parentOwner.rows[0]?.user_id
+      if (ownerId && ownerId !== me) {
+        notify(ownerId, 'replies', {
+          title: `${commenter} replied to your comment`,
+          body: preview,
+          data: { url: postId ? `/post/${postId}` : articleId ? `/article/${articleId}` : `/debate/${debateId}` },
+        })
+      }
+    } else if (postId) {
+      const postOwner = await query('SELECT user_id FROM posts WHERE id = $1', [postId])
+      const ownerId = postOwner.rows[0]?.user_id
+      if (ownerId && ownerId !== me) {
+        notify(ownerId, 'replies', {
+          title: `${commenter} commented on your post`,
+          body: preview,
+          data: { url: `/post/${postId}` },
+        })
+      }
+    }
     return c.json(result.rows[0], 201)
   } catch (err: any) {
     await client.query('ROLLBACK')

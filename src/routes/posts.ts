@@ -1,7 +1,10 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
+import { normalizeHashtags } from '../lib/hashtags'
 import { matchTopic } from '../ingest/topics'
+import { notify } from '../lib/push'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rateLimit'
 import { scorePost } from '../scoring/score'
 import type { AppEnv } from '../types'
 
@@ -24,31 +27,17 @@ const NOT_BLOCKED = `NOT EXISTS(
   SELECT 1 FROM blocks bl WHERE bl.blocker_id = $1 AND bl.blocked_id = p.user_id
 )`
 
-// Author-selected hashtags plus any #tags typed inline; normalized to
-// bare lowercase slugs, deduped, capped.
-function normalizeHashtags(provided: unknown, content: string): string[] {
-  const raw: string[] = []
-  if (Array.isArray(provided)) raw.push(...provided.map(String))
-  raw.push(...(content.match(/#([A-Za-z0-9_]{2,30})/g) ?? []))
-  const tags: string[] = []
-  for (const entry of raw) {
-    const tag = entry.replace(/^#/, '').toLowerCase().replace(/[^a-z0-9_]/g, '')
-    if (tag.length >= 2 && tag.length <= 30 && !tags.includes(tag)) tags.push(tag)
-    if (tags.length >= 8) break
-  }
-  return tags
-}
-
 // GET /posts?topic_id=X&user_id=Y&limit=50&offset=0 — newest first,
 // includes author + caller's vote
 posts.get('/', requireAuth, async (c) => {
   const topicId = c.req.query('topic_id')
   const authorId = c.req.query('user_id')
+  const feed = c.req.query('feed')
   const limit = Math.min(Number(c.req.query('limit')) || 100, 100)
   const offset = Math.max(Number(c.req.query('offset')) || 0, 0)
 
   const params: unknown[] = [c.get('userId')]
-  const conditions: string[] = [NOT_BLOCKED]
+  const conditions: string[] = [NOT_BLOCKED, 'NOT p.hidden']
   if (topicId) {
     params.push(topicId)
     conditions.push(`p.general_topic_id = $${params.length}`)
@@ -56,6 +45,9 @@ posts.get('/', requireAuth, async (c) => {
   if (authorId) {
     params.push(authorId)
     conditions.push(`p.user_id = $${params.length}`)
+  }
+  if (feed === 'following') {
+    conditions.push(`p.user_id IN (SELECT followee_id FROM follows WHERE follower_id = $1)`)
   }
   const where = `WHERE ${conditions.join(' AND ')}`
   params.push(limit, offset)
@@ -75,7 +67,7 @@ posts.get('/', requireAuth, async (c) => {
 // spectrum position is computed by the deterministic scorer — NULL when
 // the text doesn't clear the confidence gate. Client-supplied positions
 // are ignored.
-posts.post('/', requireAuth, async (c) => {
+posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_000, max: 30 }), async (c) => {
   const body = await c.req.json().catch(() => null)
   const content = String(body?.content ?? '').trim()
   const mediaUrl = body?.media_url ? String(body.media_url) : null
@@ -106,7 +98,7 @@ posts.post('/', requireAuth, async (c) => {
 
 // GET /posts/:id — single post with author + caller's vote
 posts.get('/:id', requireAuth, async (c) => {
-  const result = await query(`${POST_SELECT} WHERE p.id = $2`, [
+  const result = await query(`${POST_SELECT} WHERE p.id = $2 AND NOT p.hidden`, [
     c.get('userId'),
     c.req.param('id'),
   ])
@@ -151,6 +143,22 @@ posts.post('/:id/vote', requireAuth, async (c) => {
     await client.query('COMMIT')
 
     if (!updated.rows[0]) return c.json({ error: 'Post not found' }, 404)
+
+    if (direction === 'up') {
+      const meta = await query(
+        `SELECT p.user_id AS owner_id, u.username AS voter
+         FROM posts p, userdata u WHERE p.id = $1 AND u.id = $2`,
+        [postId, c.get('userId')]
+      )
+      const row = meta.rows[0]
+      if (row && row.owner_id !== c.get('userId')) {
+        notify(row.owner_id, 'upvotes', {
+          title: 'Your post got an upvote',
+          body: `${row.voter} upvoted your post.`,
+          data: { url: `/post/${postId}` },
+        })
+      }
+    }
     return c.json({ ...updated.rows[0], my_vote: direction })
   } catch (err) {
     await client.query('ROLLBACK')

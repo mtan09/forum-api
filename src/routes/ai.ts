@@ -2,7 +2,9 @@ import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import OpenAI from 'openai'
 import { articleSubject, postSubject, relatedCoverage } from '../ai/retrieval'
+import pool from '../db'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
 
 const ai = new Hono<AppEnv>()
@@ -104,7 +106,26 @@ Today's date is ${new Date().toISOString().slice(0, 10)}. Your training data may
 //   delta  {"perspective":"left","text":"..."}   incremental markdown
 //   done   {"left":"...","center":"...","right":"..."}  final full sections
 //   error  {"error":"..."}
-ai.post('/chat', requireAuth, async (c) => {
+// Every request here spends OpenAI money, so it gets both a burst limiter
+// and a persistent per-user daily cap (survives restarts via ai_usage).
+const AI_DAILY_LIMIT = Number(process.env.AI_DAILY_LIMIT ?? 50)
+const aiBurstLimit = rateLimit({ name: 'aiChat', windowMs: 10 * 60_000, max: 15,
+  message: 'forumAI needs a breather — try again in a few minutes.' })
+
+ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
+  const usage = await pool.query(
+    `INSERT INTO ai_usage (user_id, day, requests) VALUES ($1, CURRENT_DATE, 1)
+     ON CONFLICT (user_id, day) DO UPDATE SET requests = ai_usage.requests + 1
+     RETURNING requests`,
+    [c.get('userId')]
+  )
+  if (usage.rows[0].requests > AI_DAILY_LIMIT) {
+    return c.json(
+      { error: `You've hit today's forumAI limit (${AI_DAILY_LIMIT} questions). It resets tomorrow.` },
+      429
+    )
+  }
+
   if (!process.env.OPENAI_API_KEY) {
     return c.json(
       { error: 'AI chat is not configured — set OPENAI_API_KEY in the server .env.' },

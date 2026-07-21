@@ -10,7 +10,7 @@ const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, created_at'
 // GET /users/me — current user's profile including email
 users.get('/me', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at, a.email
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at, u.is_admin, a.email, a.email_verified
      FROM userdata u
      LEFT JOIN auth_credentials a ON a.user_id = u.id
      WHERE u.id = $1`,
@@ -189,6 +189,88 @@ users.get('/me/spectrum/history', requireAuth, async (c) => {
   return c.json({ points })
 })
 
+// GET /users/me/suggested — accounts worth following for a brand-new user:
+// the most active posters, excluding yourself and anyone you already
+// follow or block. Powers the onboarding "follow some people" step.
+users.get('/me/suggested', requireAuth, async (c) => {
+  const result = await query(
+    `SELECT u.id, u.username, u.avatar_url, u.bio,
+            count(p.id)::int AS post_count
+     FROM userdata u
+     JOIN posts p ON p.user_id = u.id AND NOT p.hidden
+     WHERE u.id <> $1
+       AND NOT u.is_banned
+       AND NOT EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = u.id)
+       AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id = $1 AND b.blocked_id = u.id)
+     GROUP BY u.id
+     ORDER BY count(p.id) DESC
+     LIMIT 10`,
+    [c.get('userId')]
+  )
+  return c.json(result.rows)
+})
+
+// POST /users/me/push-token  { token, platform } — register this device
+// for push. Tokens are unique per device; re-registering just re-owns it.
+users.post('/me/push-token', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const token = String(body?.token ?? '').trim()
+  const platform = body?.platform ? String(body.platform) : null
+  if (!token) return c.json({ error: 'token is required.' }, 400)
+  await query(
+    `INSERT INTO push_tokens (token, user_id, platform, updated_at)
+     VALUES ($1, $2, $3, NOW())
+     ON CONFLICT (token) DO UPDATE SET user_id = $2, platform = $3, updated_at = NOW()`,
+    [token, c.get('userId'), platform]
+  )
+  return c.json({ ok: true }, 201)
+})
+
+// DELETE /users/me/push-token  { token } — e.g. on sign-out
+users.delete('/me/push-token', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const token = String(body?.token ?? '').trim()
+  if (token) {
+    await query('DELETE FROM push_tokens WHERE token = $1 AND user_id = $2', [
+      token,
+      c.get('userId'),
+    ])
+  }
+  return c.json({ ok: true })
+})
+
+// GET/PUT /users/me/notification-prefs — server-side switchboard that the
+// push sender checks before every delivery.
+users.get('/me/notification-prefs', requireAuth, async (c) => {
+  const result = await query(
+    `SELECT COALESCE(p.push_enabled, TRUE) AS push_enabled,
+            COALESCE(p.replies, TRUE) AS replies,
+            COALESCE(p.upvotes, TRUE) AS upvotes,
+            COALESCE(p.dms, TRUE) AS dms
+     FROM userdata u LEFT JOIN notification_prefs p ON p.user_id = u.id
+     WHERE u.id = $1`,
+    [c.get('userId')]
+  )
+  return c.json(result.rows[0] ?? { push_enabled: true, replies: true, upvotes: true, dms: true })
+})
+
+users.put('/me/notification-prefs', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (!body) return c.json({ error: 'Invalid body' }, 400)
+  const val = (key: string) => (body[key] === undefined ? null : !!body[key])
+  await query(
+    `INSERT INTO notification_prefs (user_id, push_enabled, replies, upvotes, dms)
+     VALUES ($1, COALESCE($2, TRUE), COALESCE($3, TRUE), COALESCE($4, TRUE), COALESCE($5, TRUE))
+     ON CONFLICT (user_id) DO UPDATE SET
+       push_enabled = COALESCE($2, notification_prefs.push_enabled),
+       replies      = COALESCE($3, notification_prefs.replies),
+       upvotes      = COALESCE($4, notification_prefs.upvotes),
+       dms          = COALESCE($5, notification_prefs.dms)`,
+    [c.get('userId'), val('push_enabled'), val('replies'), val('upvotes'), val('dms')]
+  )
+  return c.json({ ok: true })
+})
+
 // POST /users/:id/block — stop seeing this user's posts and comments
 users.post('/:id/block', requireAuth, async (c) => {
   const targetId = c.req.param('id')
@@ -286,7 +368,10 @@ users.get('/me/upvoted', requireAuth, async (c) => {
       [userId]
     ),
     query(
-      `SELECT a.*, 'up' AS my_vote,
+      `SELECT a.id, a.url, a.title, a.source, a.content, a.media, a.political_lean,
+         a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
+         a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, 'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
               v.created_at AS voted_at
        FROM article_votes v
@@ -325,11 +410,14 @@ users.get('/', requireAuth, async (c) => {
   return c.json(result.rows)
 })
 
-// GET /users/:id — public profile (+ whether the caller has them blocked)
+// GET /users/:id — public profile (+ block state, follow state, counts)
 users.get('/:id', requireAuth, async (c) => {
   const result = await query(
     `SELECT ${PUBLIC_USER_COLS},
-            EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id = $2 AND b.blocked_id = id) AS blocked_by_me
+            EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id = $2 AND b.blocked_id = id) AS blocked_by_me,
+            EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $2 AND f.followee_id = id) AS followed_by_me,
+            (SELECT count(*)::int FROM follows f WHERE f.followee_id = id) AS follower_count,
+            (SELECT count(*)::int FROM follows f WHERE f.follower_id = id) AS following_count
      FROM userdata WHERE id = $1`,
     [c.req.param('id'), c.get('userId')]
   )
@@ -337,12 +425,53 @@ users.get('/:id', requireAuth, async (c) => {
   return c.json(result.rows[0])
 })
 
-// GET /users/:id/spectrum — anyone's computed placement (same math as
-// /me/spectrum; positions are activity-derived and public by design)
-users.get('/:id/spectrum', requireAuth, async (c) => {
-  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [c.req.param('id')])
+// POST /users/:id/follow · DELETE /users/:id/follow — one-directional,
+// idempotent both ways.
+users.post('/:id/follow', requireAuth, async (c) => {
+  const targetId = c.req.param('id')
+  if (targetId === c.get('userId')) return c.json({ error: "You can't follow yourself." }, 400)
+  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [targetId])
   if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
-  return c.json(await computeSpectrum(c.req.param('id')))
+  await query(
+    `INSERT INTO follows (follower_id, followee_id) VALUES ($1, $2)
+     ON CONFLICT DO NOTHING`,
+    [c.get('userId'), targetId]
+  )
+  return c.json({ ok: true }, 201)
+})
+
+users.delete('/:id/follow', requireAuth, async (c) => {
+  await query('DELETE FROM follows WHERE follower_id = $1 AND followee_id = $2', [
+    c.get('userId'),
+    c.req.param('id'),
+  ])
+  return c.json({ ok: true })
+})
+
+// GET /users/:id/spectrum — anyone's computed placement (same math as
+// /me/spectrum; positions are activity-derived and public by design).
+// OTHER people's placements are cached briefly: computeSpectrum replays the
+// user's whole vote history, and hot profiles get hit from every feed card.
+// Your own (/me/spectrum) stays live so your actions reflect instantly.
+const spectrumCache = new Map<string, { at: number; value: unknown }>()
+const SPECTRUM_TTL_MS = 5 * 60_000
+
+users.get('/:id/spectrum', requireAuth, async (c) => {
+  const id = c.req.param('id')
+  const cached = spectrumCache.get(id)
+  if (cached && Date.now() - cached.at < SPECTRUM_TTL_MS) return c.json(cached.value)
+
+  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [id])
+  if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
+  const value = await computeSpectrum(id)
+  spectrumCache.set(id, { at: Date.now(), value })
+  if (spectrumCache.size > 5000) {
+    // crude bound; stale entries expire on read anyway
+    for (const [key, entry] of spectrumCache) {
+      if (Date.now() - entry.at >= SPECTRUM_TTL_MS) spectrumCache.delete(key)
+    }
+  }
+  return c.json(value)
 })
 
 export default users

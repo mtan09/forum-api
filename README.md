@@ -32,7 +32,9 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
 - **User spectrum (`/users/:id/spectrum`)** is computed from activity, never self-declared: each scored post contributes its position at weight 3, each upvote contributes the voted content's lean at weight 1, each downvote the *mirror* of that lean. Votes on one's own posts are excluded. `/users/me/spectrum/history` replays the same math at each recent month-end for the profile trajectory sparkline.
 - **The Floor (`/debates`)** auto-picks up to 6 daily rooms from the story clusters — `biggest` (top-scored), `contested` (deepest coverage from *both* wings), and `trending` fill — generated lazily and topped up per request. Users pin a position (`POST /debates/:id/vote`), which unlocks a 10-bin distribution + median and a shared thread. `GET /debates/recap` returns yesterday's rooms with their final numbers. The Floor's "day" is anchored to `America/New_York` so UTC rollover doesn't blank the evening's rooms.
-- **Moderation** — `POST /reports` flags a post/article/comment/user (one live report per reporter per target); `POST`/`DELETE /users/:id/block` are one-directional blocks enforced in read queries (feed, comments, search all filter blocked authors); `GET /users/me/blocks` lists them.
+- **Moderation** — `POST /reports` flags a post/article/comment/user (one live report per reporter per target); `POST`/`DELETE /users/:id/block` are one-directional blocks enforced in read queries (feed, comments, search, DMs); `GET /users/me/blocks` lists them. Admins (`userdata.is_admin`) review reports via `/admin/reports` and resolve with hide (content vanishes from all reads), ban (`is_banned` accounts are locked out at the auth layer), or dismiss.
+- **Social** — one-directional follows (`POST`/`DELETE /users/:id/follow`, `GET /posts?feed=following`) and pair-keyed DMs (`/messages` inbox with unread counts, `/messages/with/:userId` threads) with push notifications on send.
+- **Hardening** — sliding-window rate limits on every sensitive route (auth, uploads, posting, AI), a persistent per-user daily forumAI budget (`ai_usage`), email verification + reset codes (Resend, console fallback in dev), uploads re-encoded to bounded JPEGs with EXIF stripped, GIN-indexed full-text search, and env-gated Sentry + a DB-checking `/health`.
 
 ## Getting started
 
@@ -48,7 +50,9 @@ npm run seed:expand                              # lived-in community via the AP
 npm run ingest                                   # fetch + score real news into the article feed
 ```
 
-Dev logins after seeding: `john@example.dev` / `jane@example.dev` / `alice@example.dev`, password `password123`.
+Dev logins after seeding: `john@example.dev` / `jane@example.dev` / `alice@example.dev`, password `password123` (john is an admin in dev).
+
+`npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
 Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins).
 
@@ -58,18 +62,23 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 |---|---|---|
 | `POST /auth/signup` `{username,email,password}` | — | Create account → `{token, user}` |
 | `POST /auth/login` `{email,password}` | — | Log in → `{token, user}` |
-| `POST /auth/change-password` `{current,next}` | ✅ | Change password |
+| `POST /auth/change-password` `{current_password,new_password}` | ✅ | Change password |
+| `GET /auth/verify?token=` · `POST /auth/resend-verification` | Link / ✅ | Verify email or resend the verification link |
+| `POST /auth/forgot-password` · `/reset-password` | — | Request and redeem an emailed reset code |
 | `GET /users/me` · `PATCH /users/me` · `DELETE /users/me` | ✅ | Own profile (patch: username/bio/avatar_url/header_url) / delete account |
 | `GET /users/me/spectrum` · `/history` | ✅ | Computed political placement + monthly trajectory |
 | `GET /users/me/posts` · `/comments` · `/upvoted` | ✅ | Own content for the profile tabs |
-| `GET /users?ids=` · `GET /users/:id` · `GET /users/:id/spectrum` | ✅ | Public profiles + their computed spectrum |
+| `GET /users?ids=` · `GET /users/:id` · `GET /users/:id/spectrum` | ✅ | Public profiles, follow/block state, counts, and computed spectrum |
+| `GET /users/me/suggested` · `POST`/`DELETE /users/:id/follow` | ✅ | Onboarding suggestions and follow/unfollow |
+| `POST`/`DELETE /users/me/push-token` | ✅ | Register or remove an Expo push token |
+| `GET`/`PUT /users/me/notification-prefs` | ✅ | Read or update server-enforced push preferences |
 | `POST`/`DELETE /users/:id/block` · `GET /users/me/blocks` | ✅ | Block / unblock / list blocked users |
-| `GET /posts?topic_id=&user_id=&limit=&offset=` | ✅ | Feed (author + vote joined, blocked authors filtered) |
+| `GET /posts?topic_id=&user_id=&feed=following&limit=&offset=` | ✅ | Paginated feed (author + vote joined, blocked/hidden content filtered) |
 | `POST /posts` `{content,media_url?,hashtags?}` | ✅ | Create post (spectrum position computed server-side) |
 | `POST /posts/:id/vote` `{direction: up\|down\|null}` | ✅ | Vote / unvote (counters recomputed transactionally) |
 | `GET /comments?post_id=\|article_id=\|debate_id=\|parent_comment_id=&page=&limit=` | ✅ | Paginated comments with reply counts |
 | `POST /comments` `{post_id?\|article_id?\|debate_id?\|parent_comment_id?,content}` | ✅ | Comment or reply (on posts, articles, or debates) |
-| `GET /articles?topic_id=&subtopic_id=` · `GET /articles/:id` | — | News articles (`my_vote`/`my_bookmark` joined when authed) |
+| `GET /articles?topic_id=&subtopic_id=&limit=&offset=` · `GET /articles/:id` | — | Paginated news (`my_vote`/`my_bookmark` joined when authed) |
 | `POST /articles/:id/vote` `{direction: up\|down\|null}` | ✅ | Vote / unvote an article |
 | `GET /topics` · `/topics/hot` · `/topics/subtopics/:id` | — | Topics, hot-topic carousel, subtopic detail + articles |
 | `GET /debates` · `/debates/recap` · `/debates/:id` | ✅ | Today's Floor rooms, yesterday's recap, one room + distribution |
@@ -77,15 +86,30 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `POST /bookmarks/toggle` `{post_id?\|article_id?}` · `GET /bookmarks` | ✅ | Save/unsave; list saved posts + articles |
 | `GET /search?q=` | ✅ | Search users, sources, posts (+#hashtags), articles |
 | `GET /sources/:name` | — | Source detail: rating, stats, content mix, recent coverage |
+| `GET /messages` · `/unread-count` · `/with/:userId` | ✅ | DM inbox, unread total, and a read-marking conversation thread |
+| `POST /messages/with/:userId` `{content}` | ✅ | Send a block-aware, rate-limited direct message |
 | `POST /reports` `{target_kind,target_id,reason,detail?}` | ✅ | Flag a post/article/comment/user |
+| `GET /admin/reports` · `POST /admin/reports/:id/resolve` | Admin | Review reports; hide, ban, or dismiss |
 | `POST /storage/upload?filename=x.jpg` (raw bytes) | ✅ | Image upload → `{url}` (disk in dev, R2 when configured) |
-| `POST /ai/chat` `{message,framing?,history?,articleId?,postId?}` | ✅ | forumAI — SSE stream of Left/Center/Right, grounded in the article corpus |
+| `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream, grounded in the article corpus |
+| `GET /legal/terms` · `/legal/privacy` | — | Public legal pages |
+| `GET /` · `/p/:id` · `/a/:id` | — | Product landing and Open Graph share pages with app deep links |
 
 Auth: `Authorization: Bearer <jwt>`. Errors: `{error: string}` with a meaningful status.
 
 ## forumAI
 
-`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over the app's own recent article corpus — related coverage is pulled by keyword overlap and injected as context, so answers reflect current events without an LLM in the scoring path. Passing `articleId` or `postId` focuses the chat on that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY`.
+`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over the app's own recent article corpus — related coverage is pulled by keyword overlap and injected as context, so answers reflect current events without an LLM in the scoring path. Passing `article_id` or `post_id` focuses the chat on that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
+
+## Configuration and secrets
+
+Copy `.env.example` to `.env` for local development. `.env` is gitignored and must never be committed; `.env.example` contains names and safe defaults/placeholders only. Production secrets belong in the deployment provider:
+
+- Required: `DATABASE_URL`, a strong `JWT_SECRET`
+- forumAI: `OPENAI_API_KEY`, optional `AI_DAILY_LIMIT`
+- Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`
+- Email: `RESEND_API_KEY`, `EMAIL_FROM`, `LEGAL_CONTACT_EMAIL`
+- Observability: optional `SENTRY_DSN`
 
 ## Going to production
 

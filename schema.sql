@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS userdata (
   avatar_url  TEXT,
   bio         TEXT,
   header_url  TEXT,
+  is_admin    BOOLEAN NOT NULL DEFAULT FALSE,
+  is_banned   BOOLEAN NOT NULL DEFAULT FALSE,
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -16,6 +18,7 @@ CREATE TABLE IF NOT EXISTS userdata (
 -- Emails are stored lowercased by the API.
 CREATE TABLE IF NOT EXISTS auth_credentials (
   user_id       TEXT PRIMARY KEY REFERENCES userdata(id) ON DELETE CASCADE,
+  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
   email         TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   created_at    TIMESTAMPTZ DEFAULT NOW()
@@ -59,6 +62,9 @@ CREATE TABLE IF NOT EXISTS posts (
   upvotes             INTEGER DEFAULT 0,
   downvotes           INTEGER DEFAULT 0,
   commentcount        INTEGER DEFAULT 0,
+  hidden              BOOLEAN NOT NULL DEFAULT FALSE,
+  search_tsv          TSVECTOR GENERATED ALWAYS AS
+                        (to_tsvector('english', coalesce(content, ''))) STORED,
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -84,6 +90,8 @@ CREATE TABLE IF NOT EXISTS articles (
   subtopic_id         UUID REFERENCES subtopics(id),
   published_at        TIMESTAMPTZ,
   status              TEXT DEFAULT 'ready' CHECK (status IN ('pending', 'ready')),
+  search_tsv          TSVECTOR GENERATED ALWAYS AS
+                        (to_tsvector('english', coalesce(title, '') || ' ' || left(coalesce(content, ''), 20000))) STORED,
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -119,6 +127,7 @@ CREATE TABLE IF NOT EXISTS comments (
   content           TEXT NOT NULL,
   upvotes           INTEGER DEFAULT 0,
   downvotes         INTEGER DEFAULT 0,
+  hidden            BOOLEAN NOT NULL DEFAULT FALSE,
   created_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -170,6 +179,9 @@ CREATE TABLE IF NOT EXISTS reports (
   target_id   TEXT NOT NULL,
   reason      TEXT NOT NULL CHECK (reason IN ('spam', 'harassment', 'misinformation', 'hate', 'other')),
   detail      TEXT,
+  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved', 'dismissed')),
+  resolved_by TEXT REFERENCES userdata(id),
+  resolved_at TIMESTAMPTZ,
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (reporter_id, target_kind, target_id)
 );
@@ -191,6 +203,76 @@ CREATE TABLE IF NOT EXISTS user_positions (
   PRIMARY KEY (user_id, topic_id)
 );
 
+CREATE TABLE IF NOT EXISTS follows (
+  follower_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  followee_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (follower_id, followee_id),
+  CHECK (follower_id <> followee_id)
+);
+CREATE INDEX IF NOT EXISTS idx_follows_followee ON follows (followee_id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  a_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  b_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_message_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (a_id < b_id),
+  UNIQUE (a_id, b_id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_a ON conversations (a_id, last_message_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_b ON conversations (b_id, last_message_at DESC);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_reads (
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  platform TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_user ON push_tokens (user_id);
+
+CREATE TABLE IF NOT EXISTS notification_prefs (
+  user_id TEXT PRIMARY KEY REFERENCES userdata(id) ON DELETE CASCADE,
+  push_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  replies BOOLEAN NOT NULL DEFAULT TRUE,
+  upvotes BOOLEAN NOT NULL DEFAULT TRUE,
+  dms BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS email_tokens (
+  token TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('verify', 'reset')),
+  attempts INT NOT NULL DEFAULT 0,
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_email_tokens_user ON email_tokens (user_id, kind);
+
+CREATE TABLE IF NOT EXISTS ai_usage (
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  day DATE NOT NULL,
+  requests INT NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, day)
+);
+
 -- ============================================================
 -- Indexes
 -- ============================================================
@@ -198,14 +280,17 @@ CREATE TABLE IF NOT EXISTS user_positions (
 CREATE INDEX IF NOT EXISTS idx_posts_topic      ON posts(general_topic_id);
 CREATE INDEX IF NOT EXISTS idx_posts_created    ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_user       ON posts(user_id);
+CREATE INDEX IF NOT EXISTS idx_posts_tsv        ON posts USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_articles_topic   ON articles(general_topic_id);
 CREATE INDEX IF NOT EXISTS idx_articles_status  ON articles(status);
 CREATE INDEX IF NOT EXISTS idx_articles_created ON articles(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_tsv      ON articles USING GIN (search_tsv);
 CREATE INDEX IF NOT EXISTS idx_comments_post    ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_comments_article ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_comments_parent  ON comments(parent_comment_id);
 CREATE INDEX IF NOT EXISTS idx_votes_post       ON votes(post_id);
 CREATE INDEX IF NOT EXISTS idx_article_votes_article ON article_votes(article_id);
+CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC);
 
 -- ============================================================
 -- Seed: general_topics

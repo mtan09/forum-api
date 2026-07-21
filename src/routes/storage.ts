@@ -3,7 +3,9 @@ import { mkdir, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { Hono } from 'hono'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
+import sharp from 'sharp'
 import { requireAuth } from '../middleware/auth'
+import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
 
 const storage = new Hono<AppEnv>()
@@ -44,7 +46,7 @@ function r2Client() {
 // POST /storage/upload?filename=photo.jpg — raw image bytes in the body.
 // Stores to R2 when configured, otherwise ./uploads on disk.
 // Returns { url, key } where url is publicly fetchable.
-storage.post('/upload', requireAuth, async (c) => {
+storage.post('/upload', requireAuth, rateLimit({ name: 'upload', windowMs: 60 * 60_000, max: 30 }), async (c) => {
   const filename = c.req.query('filename') ?? 'upload.jpg'
   const ext = filename.split('.').pop()?.toLowerCase() ?? ''
   const contentType = CONTENT_TYPES[ext]
@@ -55,11 +57,32 @@ storage.post('/upload', requireAuth, async (c) => {
     )
   }
 
-  const body = Buffer.from(await c.req.arrayBuffer())
+  let body = Buffer.from(await c.req.arrayBuffer())
   if (body.length === 0) return c.json({ error: 'Empty upload body.' }, 400)
   if (body.length > MAX_BYTES) return c.json({ error: 'File exceeds 10 MB limit.' }, 413)
 
-  const key = `${c.get('userId')}/${Date.now()}.${ext}`
+  // Normalize every upload to a bounded JPEG (max 1600px, quality 82).
+  // Phone photos arrive at 3-12 MB; the feed then re-downloads them for
+  // every viewer, so re-encoding here cuts bandwidth ~10x. Also strips
+  // EXIF (GPS!) and neutralizes malformed image payloads. GIFs pass
+  // through untouched to keep animation.
+  let outExt = ext
+  let outType = contentType
+  if (ext !== 'gif') {
+    try {
+      body = await sharp(body, { failOn: 'error' })
+        .rotate() // bake in EXIF orientation before stripping metadata
+        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 82, mozjpeg: true })
+        .toBuffer()
+      outExt = 'jpg'
+      outType = 'image/jpeg'
+    } catch {
+      return c.json({ error: 'That file does not look like a valid image.' }, 400)
+    }
+  }
+
+  const key = `${c.get('userId')}/${Date.now()}.${outExt}`
 
   if (r2Configured()) {
     await r2Client().send(
@@ -67,7 +90,7 @@ storage.post('/upload', requireAuth, async (c) => {
         Bucket: process.env.R2_BUCKET_NAME!,
         Key: key,
         Body: body,
-        ContentType: contentType,
+        ContentType: outType,
       })
     )
     const publicBase = process.env.R2_PUBLIC_URL?.replace(/\/$/, '')

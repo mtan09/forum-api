@@ -33,7 +33,10 @@ sources.get('/:name', optionalAuth, async (c) => {
       [name]
     ),
     query(
-      `SELECT a.*, v.direction AS my_vote,
+      `SELECT a.id, a.url, a.title, a.source, a.content, a.media, a.political_lean,
+         a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
+         a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, v.direction AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark
        FROM articles a
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1

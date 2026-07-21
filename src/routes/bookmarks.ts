@@ -60,7 +60,10 @@ bookmarks.get('/', requireAuth, async (c) => {
       [userId]
     ),
     query(
-      `SELECT a.*, v.direction AS my_vote, TRUE AS my_bookmark, b.created_at AS saved_at
+      `SELECT a.id, a.url, a.title, a.source, a.content, a.media, a.political_lean,
+         a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
+         a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, v.direction AS my_vote, TRUE AS my_bookmark, b.created_at AS saved_at
        FROM bookmarks b
        JOIN articles a ON a.id = b.article_id
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1

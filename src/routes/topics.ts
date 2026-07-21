@@ -44,7 +44,10 @@ topics.get('/subtopics/:id', async (c) => {
   const [subtopicResult, articlesResult] = await Promise.all([
     query('SELECT * FROM subtopics WHERE id = $1', [id]),
     query(
-      `SELECT * FROM articles WHERE subtopic_id = $1 AND status = 'ready'
+      `SELECT id, url, title, source, content, media, political_lean,
+         political_relevance, lean_confidence, content_type, lean_signals,
+         source_lean, scorer_version, upvotes, downvotes, commentcount,
+         general_topic_id, subtopic_id, published_at, status, created_at FROM articles WHERE subtopic_id = $1 AND status = 'ready'
        ORDER BY published_at DESC NULLS LAST`,
       [id]
     ),
