@@ -9,9 +9,11 @@
     "ingest": "tsx src/ingest/run.ts",
     "cluster": "tsx src/ingest/cluster-run.ts",
     "rescore": "tsx src/scoring/rescore.ts",
+    "audit:posts": "tsx src/scoring/audit-posts.ts",
     "seed:dev": "node scripts/seed-dev.mjs",
     "seed:community": "node scripts/seed-community.mjs",
     "seed:expand": "node scripts/seed-expand.mjs",
+    "seed:stances": "tsx src/scoring/seed-stance-posts.ts",
     "setup:install": "bash scripts/install-clis.sh",
     "setup": "node scripts/setup.mjs",
     "test": "vitest run"

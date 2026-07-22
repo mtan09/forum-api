@@ -65,7 +65,7 @@ posts.get('/', requireAuth, async (c) => {
 // Hashtags are author-selected (plus inline #tags in the text). The
 // general topic is derived server-side as background metadata, and the
 // spectrum position is computed by the deterministic scorer — NULL when
-// the text doesn't clear the confidence gate. Client-supplied positions
+// the text contains no directional evidence. Client-supplied positions
 // are ignored.
 posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_000, max: 30 }), async (c) => {
   const body = await c.req.json().catch(() => null)

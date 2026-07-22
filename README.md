@@ -27,8 +27,8 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
 - **Lean (0 = left, 1 = right):** starts from the outlet's published lean rating (AllSides/Ad Fontes approximations in `sources.ts`), then shifts by at most ±0.25 based on partisan framing vocabulary in the text (Gentzkow–Shapiro-style term pairs: "estate tax"/"death tax", "undocumented"/"illegal alien", ...). Framing counts only outside quotations and is capped per term.
 - **Fact vs. opinion:** a separate subjectivity score (loaded language, first person, opinion markers, quote density) plus URL/section heuristics classifies each piece as `factual_report` / `news_report` / `analysis` / `opinion`. The app shows reporting with a "Source Lean" bar and a badge instead of claiming the article itself has a measured slant.
-- **Posts:** scored at creation with the same features; no outlet prior exists, so neutral text sits at center (0.5) and partisan framing shifts it.
-- **Reproducible by construction:** the entire scale is committed lexicons + fixed weights (`src/scoring/lexicons.ts`, `score.ts`). Every score stores the signals that produced it (`lean_signals` / `position_signals`) and its `scorer_version` — surfaced verbatim in the app's **scorer receipts** UI. Changing any lexicon/weight/prior = bump `SCORER_VERSION` and `npm run rescore` to recompute everything from stored text.
+- **Posts:** no outlet prior exists, so post placement combines partisan framing with a versioned US issue-and-stance ontology (`src/scoring/stances.ts`). The ontology recognizes explicit propositions such as requiring congressional authorization for war, expanding immigration pathways, strengthening collective bargaining, or cutting federal spending. Posts with no directional evidence store `NULL` rather than being falsely labeled center; genuine mixed evidence can still land at 0.5.
+- **Reproducible by construction:** the entire scale is committed lexicons, stance rules, and fixed weights (`src/scoring/lexicons.ts`, `stances.ts`, `score.ts`). Every score stores the signals that produced it (`lean_signals` / `position_signals`) and its `scorer_version` — surfaced verbatim in the app's **scorer receipts** UI. Changing any lexicon, stance, weight, or prior = bump `SCORER_VERSION` and `npm run rescore` to recompute everything from stored text. `npm run audit:posts` is a read-only preview of current versus proposed post scores.
 
 ## User spectrum, The Floor & moderation
 
@@ -50,13 +50,14 @@ npm install
 npm run dev                                      # http://localhost:3000
 npm run seed:expand                              # lived-in community via the API
 npm run ingest                                   # fetch + score real news into the article feed
+npm run audit:posts                              # read-only scorer audit over stored posts
 ```
 
 Dev logins after seeding: `john@example.dev` / `jane@example.dev` / `alice@example.dev`, password `password123` (john is an admin in dev).
 
 `npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image validation, extracted-content quality, and bounded summary leads); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
-Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins).
+Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins), and `seed:stances` (focused left/right/mixed scoring fixture for an existing mock community). The expansion includes the same substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
 
 ## Endpoints
 

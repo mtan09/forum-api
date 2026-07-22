@@ -53,8 +53,8 @@ CREATE TABLE IF NOT EXISTS posts (
   content             TEXT,
   media_url           TEXT,
   general_topic_id    UUID REFERENCES general_topics(id),
-  -- position is set by the scorer at creation; NULL = confidence gate
-  -- not met, the app shows no spectrum placement (see src/scoring/)
+  -- position is set by the scorer at creation; NULL = no directional
+  -- evidence, so the app shows no spectrum placement (see src/scoring/)
   position            FLOAT CHECK (position BETWEEN 0 AND 1),
   position_confidence FLOAT CHECK (position_confidence BETWEEN 0 AND 1),
   position_signals    TEXT[] DEFAULT '{}',

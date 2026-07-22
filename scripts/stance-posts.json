@@ -1,0 +1,98 @@
+[
+  {
+    "username": "Maya Patel",
+    "hashtags": ["climate", "energy"],
+    "expected": [0, 0.4],
+    "content": "Oil companies should not get to privatize the profits and socialize the damage. Cut carbon emissions, invest in clean energy, and make polluters pay for the transition."
+  },
+  {
+    "username": "Jamal Carter",
+    "hashtags": ["labor", "minimumwage"],
+    "expected": [0, 0.4],
+    "content": "Congress should raise the federal minimum wage and protect collective bargaining. Workers deserve a union and a living wage, not another lecture about waiting for the market."
+  },
+  {
+    "username": "Emily Chen",
+    "hashtags": ["healthcare", "medicare"],
+    "expected": [0, 0.4],
+    "content": "Health care is a human right, not a perk tied to your employer. Medicare for All would replace a maze of insurance denials with one system accountable to voters."
+  },
+  {
+    "username": "Priya Raman",
+    "hashtags": ["abortion", "rights"],
+    "expected": [0, 0.4],
+    "content": "Congress should protect abortion access nationwide. Reproductive freedom and bodily autonomy should not disappear when someone crosses a state line."
+  },
+  {
+    "username": "Dave Kowalski",
+    "hashtags": ["guns", "schools"],
+    "expected": [0, 0.4],
+    "content": "I support universal background checks and Congress should ban assault weapons. Gun safety laws respect responsible owners while making the next school shooting harder."
+  },
+  {
+    "username": "Omar Haddad",
+    "hashtags": ["immigration", "daca"],
+    "expected": [0, 0.4],
+    "content": "Congress should create a path to citizenship for DACA recipients and expand legal immigration pathways. Permanent limbo is not a serious policy."
+  },
+  {
+    "username": "Hank Pearson",
+    "hashtags": ["military", "iran"],
+    "expected": [0.6, 1],
+    "content": "Deterrence only works when adversaries believe America will finish the mission. Pulling back in the middle of a military campaign invites a larger war later."
+  },
+  {
+    "username": "Linda Maddox",
+    "hashtags": ["education", "schoolchoice"],
+    "expected": [0.6, 1],
+    "content": "Parents should choose the school that fits their child, and states should expand school vouchers. District bureaucracies should not trap families by ZIP code."
+  },
+  {
+    "username": "Bruce Hartman",
+    "hashtags": ["crime", "police"],
+    "expected": [0.6, 1],
+    "content": "Cities should fund the police, hire more officers, and impose tougher sentences on repeat violent offenders. Public safety is the first duty of government."
+  },
+  {
+    "username": "Colton Reeves",
+    "hashtags": ["energy", "oil"],
+    "expected": [0.6, 1],
+    "content": "America should drill more oil, approve pipelines, and expand domestic energy production. Affordable energy and national security matter more than activist timetables."
+  },
+  {
+    "username": "Becky Sullivan",
+    "hashtags": ["spending", "taxes"],
+    "expected": [0.6, 1],
+    "content": "Washington should cut federal spending and lower taxes before asking families for another dollar. The national debt is unsustainable, not an accounting abstraction."
+  },
+  {
+    "username": "Sam Whitfield",
+    "hashtags": ["abortion", "prolife"],
+    "expected": [0.6, 1],
+    "content": "States should restrict abortion and protect unborn life. A humane society can support mothers without pretending life begins only when it is politically convenient."
+  },
+  {
+    "username": "Kyle Brandt",
+    "hashtags": ["healthcare", "markets"],
+    "expected": [0.6, 1],
+    "content": "Government-run health care would replace insurance bureaucracy with federal bureaucracy. Real health care choice requires transparent prices and market competition."
+  },
+  {
+    "username": "Becky Sullivan",
+    "hashtags": ["labor", "smallbusiness"],
+    "expected": [0.6, 1],
+    "content": "A nationwide $25 minimum wage kills jobs in towns where small businesses cannot absorb city-level labor costs. Washington should stop pretending every local economy is identical."
+  },
+  {
+    "username": "Victor Nguyen",
+    "hashtags": ["immigration", "border", "daca"],
+    "expected": [0.45, 0.55],
+    "content": "Congress should secure the border and create a path to citizenship for DACA recipients. Enforcement and a functioning legal pathway belong in the same bill."
+  },
+  {
+    "username": "Reggie Walls",
+    "hashtags": ["climate", "energy"],
+    "expected": [0.45, 0.55],
+    "content": "Cut carbon emissions, invest in clean energy, and expand domestic energy production while the grid catches up. Climate goals and reliable power both matter."
+  }
+]

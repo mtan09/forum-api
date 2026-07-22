@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 // Second community wave: 20 more users (31 total), more posts, deeper
 // threads, and interactions everywhere the app has them — post/article/
 // comment votes, bookmarks, and debate pins + threads on The Floor.
@@ -9,6 +11,9 @@
 
 const API = process.env.API_URL || 'http://localhost:3000'
 const PASSWORD = 'password123'
+const STANCE_POSTS = JSON.parse(
+  readFileSync(new URL('./stance-posts.json', import.meta.url), 'utf8')
+)
 
 // Original 11 (login only) with inferred persona leans, then 20 new.
 const USERS = [
@@ -132,6 +137,10 @@ const POSTS = [
     content: 'Fentanyl seizures at legal ports of entry dwarf what comes between them. If you care about the actual drug flow, fund the scanners. Boring answers save lives.' },
   { user: 22, hashtags: ['insurance', 'climate'],
     content: 'State Farm just non-renewed half my town. Climate risk is hitting your insurance bill years before it hits your ideology. The market is done debating.' },
+  ...STANCE_POSTS.map((post) => ({
+    ...post,
+    user: USERS.findIndex((user) => user.username === post.username),
+  })),
 ]
 
 // [postIndex (into POSTS above), userIndex, content]
@@ -380,9 +389,19 @@ async function main() {
   const postIds = []
   for (const p of POSTS) {
     const found = existingPosts.find((e) => e.content === p.content)
-    if (found) { postIds.push(found.id); continue }
-    const created = await call('/posts', { token: tokens[p.user], body: { content: p.content, hashtags: p.hashtags } })
-    postIds.push(created.id)
+    const post = found ?? await call('/posts', {
+      token: tokens[p.user],
+      body: { content: p.content, hashtags: p.hashtags },
+    })
+    postIds.push(post.id)
+    if (p.expected) {
+      const [min, max] = p.expected
+      if (post.position == null || post.position < min || post.position > max) {
+        throw new Error(
+          `Seed stance outside expected range ${min}–${max}: ${post.position ?? 'unclassified'} — ${p.content}`
+        )
+      }
+    }
   }
   console.log(`${postIds.length} wave-2 posts ready`)
 

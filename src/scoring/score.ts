@@ -17,13 +17,15 @@
 // ============================================================
 
 import { extractFeatures, type TextFeatures } from './features'
+import { detectStances, type StanceHit } from './stances'
 
 // Bump on ANY change to lexicons, weights, or thresholds, then run
 // `npm run rescore` so stored scores stay comparable.
 // 1.1.0: framing counted outside quotes only, capped at 3 per term
-// 1.2.0: posts are always placed (neutral text sits at 0.5); the
-//        confidence gate no longer hides placement, it's just metadata
-export const SCORER_VERSION = 'lex-1.2.0'
+// 1.2.0: posts were always placed; neutral and unrecognized text sat at 0.5
+// 2.0.0: posts combine partisan framing with a transparent policy-stance
+//        ontology; text with no directional evidence is left unclassified
+export const SCORER_VERSION = 'stance-2.0.0'
 
 export type ContentType = 'news_report' | 'opinion' | 'analysis' | 'factual_report'
 
@@ -37,7 +39,7 @@ export type ArticleScore = {
 }
 
 export type PostScore = {
-  position: number           // always placed; no partisan signal = 0.5 center
+  position: number | null    // null = no directional evidence, not "centrist"
   confidence: number
   signals: string[]
   scorer_version: string
@@ -119,6 +121,12 @@ function describeHits(prefix: 'left' | 'right' | 'loaded', hits: TextFeatures['l
     .map((h) => `${prefix}:"${h.term}"×${h.count}`)
 }
 
+function describeStances(hits: StanceHit[]): string[] {
+  return hits.map((hit) =>
+    `stance-${hit.side}:"${hit.issue} · ${hit.label}"×1`
+  )
+}
+
 export function scoreArticle(input: {
   title: string
   content: string
@@ -172,17 +180,38 @@ export function scoreArticle(input: {
 
 // --- Posts ----------------------------------------------------------
 // No outlet prior exists for a user post, so the text carries all the
-// weight. Every post gets a placement: no partisan signal = 0.5 center.
-// Confidence is stored as metadata (how much evidence backs the number)
-// but never hides the bar.
+// weight. Partisan framing captures word choice; policy stances capture
+// propositions expressed without slogans. Text without directional evidence
+// remains unclassified instead of being mislabeled as centrist.
 export function scorePost(content: string): PostScore {
   const f = extractFeatures(content)
-  const { net, strength } = textSignal(f)
+  const framing = textSignal(f)
+  const stances = detectStances(content)
+  const stanceLeft = stances
+    .filter((hit) => hit.side === 'left')
+    .reduce((sum, hit) => sum + hit.weight, 0)
+  const stanceRight = stances
+    .filter((hit) => hit.side === 'right')
+    .reduce((sum, hit) => sum + hit.weight, 0)
+  const stanceEvidence = stanceLeft + stanceRight
+  const stanceNet = stanceEvidence > 0
+    ? (stanceRight - stanceLeft) / stanceEvidence
+    : 0
+  const stanceStrength = Math.min(stanceEvidence / 4, 1)
 
-  const position = clamp01(0.5 + net * strength * 0.45)
+  // Framing is a softer signal than an explicit policy stance. The combined
+  // movement is capped so even highly partisan language stays on the scale.
+  const shift = Math.max(-0.45, Math.min(0.45,
+    framing.net * framing.strength * 0.30 +
+    stanceNet * stanceStrength * 0.35
+  ))
+  const evidence = f.leftCount + f.rightCount + stanceEvidence
+
+  const position = evidence > 0 ? clamp01(0.5 + shift) : null
   const confidence = clamp01(
-    0.15 +
-    0.5 * strength +
+    0.1 +
+    0.25 * framing.strength +
+    0.4 * stanceStrength +
     0.15 * Math.min(f.wordCount / 120, 1) +
     0.1 * Math.min(f.politicalCount / 3, 1)
   )
@@ -190,13 +219,14 @@ export function scorePost(content: string): PostScore {
   const signals = [
     `scorer:${SCORER_VERSION}`,
     `confidence:${confidence.toFixed(2)}`,
+    ...describeStances(stances),
     ...describeHits('left', f.leftHits),
     ...describeHits('right', f.rightHits),
     ...describeHits('loaded', f.loadedHits),
   ]
 
   return {
-    position: Number(position.toFixed(3)),
+    position: position == null ? null : Number(position.toFixed(3)),
     confidence: Number(confidence.toFixed(3)),
     signals,
     scorer_version: SCORER_VERSION,
