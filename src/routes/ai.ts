@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import OpenAI from 'openai'
-import { articleSubject, postSubject, relatedCoverage } from '../ai/retrieval'
+import { articleSubject, corpusCoverage, postSubject } from '../ai/retrieval'
 import pool from '../db'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
@@ -154,9 +154,10 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
     .slice(-2)
     .map((h) => String(h.content))
     .join(' ')
-  const coverage = await relatedCoverage(
+  const coverage = await corpusCoverage(
     `${message} ${recentUserTurns} ${subject?.seed ?? ''}`,
-    articleId
+    articleId,
+    message
   )
 
   const client = new OpenAI()

@@ -17,6 +17,25 @@ const LEAD_CLAMP = 220
 const SUBJECT_CLAMP = 900
 const COVERAGE_CLAMP = 2600
 
+export type CoverageIntent = 'top_story' | 'latest' | 'relevance'
+
+// Broad prompts do not contain a topic keyword to match. Route them to the
+// corpus's own hot-story index or newest coverage instead of returning an
+// empty context block.
+export function coverageIntent(text: string): CoverageIntent {
+  const normalized = text.toLowerCase().replace(/[’]/g, "'")
+  if (
+    /\b(?:biggest|top|main|most important|leading) (?:news )?(?:story|stories|headline|headlines)\b/.test(normalized) ||
+    /\bwhat(?:'s| is) the (?:biggest|top|main) story\b/.test(normalized)
+  ) return 'top_story'
+  if (
+    /\b(?:today's|todays|latest|current) (?:news|headlines|stories|events)\b/.test(normalized) ||
+    /\bwhat(?:'s| is) (?:happening|in the news) today\b/.test(normalized) ||
+    /\b(?:news|headline) roundup\b/.test(normalized)
+  ) return 'latest'
+  return 'relevance'
+}
+
 function clamp(text: string, max: number): string {
   const t = text.replace(/\s+/g, ' ').trim()
   return t.length <= max ? t : t.slice(0, max - 1).trimEnd() + '…'
@@ -43,6 +62,7 @@ const QUESTION_FILLER = new Set([
   'mean', 'means', 'stance', 'debate', 'question', 'answer', 'talk', 'discuss',
   'understand', 'info', 'information', 'ask', 'asking', 'wondering', 'know',
   'thing', 'things', 'issue', 'issues', 'topic', 'topics', 'summarize', 'summary',
+  'today', 'story', 'stories', 'biggest', 'latest', 'headline', 'headlines', 'spin',
 ])
 
 function fold(term: string): string {
@@ -89,6 +109,114 @@ type ArticleRow = {
   source_lean: number | null
   published_at: string | null
   content: string | null
+  subtopic_id?: string | null
+}
+
+type StoryRow = {
+  id: string
+  title: string
+  short_summary: string | null
+  volume: number
+  score: number
+}
+
+function articleLine(a: ArticleRow): string {
+  return `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}: ${clamp(a.content ?? '', LEAD_CLAMP)}`
+}
+
+function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] {
+  const sorted = [...rows].sort((a, b) =>
+    (Date.parse(b.published_at ?? '1970-01-01') || 0) -
+    (Date.parse(a.published_at ?? '1970-01-01') || 0)
+  )
+  const picked: ArticleRow[] = []
+  const used = new Set<string>()
+  const outlets = new Map<string, number>()
+  const bands = [
+    (a: ArticleRow) => Number(a.source_lean ?? 0.5) < 0.4,
+    (a: ArticleRow) => Number(a.source_lean ?? 0.5) >= 0.4 && Number(a.source_lean ?? 0.5) <= 0.6,
+    (a: ArticleRow) => Number(a.source_lean ?? 0.5) > 0.6,
+  ]
+
+  const add = (article: ArticleRow | undefined) => {
+    if (!article || used.has(article.id)) return
+    const outlet = article.source ?? ''
+    if ((outlets.get(outlet) ?? 0) >= MAX_PER_OUTLET) return
+    used.add(article.id)
+    outlets.set(outlet, (outlets.get(outlet) ?? 0) + 1)
+    picked.push(article)
+  }
+
+  for (const band of bands) add(sorted.find(band))
+  for (const article of sorted) {
+    if (picked.length >= limit) break
+    add(article)
+  }
+  return picked.slice(0, limit)
+}
+
+async function latestCoverage(excludeId?: string | null): Promise<string> {
+  const result = await query(
+    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+     FROM articles
+     WHERE status = 'ready' AND title IS NOT NULL
+       AND id <> COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+       AND COALESCE(published_at, created_at) > NOW() - INTERVAL '3 days'
+     ORDER BY published_at DESC NULLS LAST
+     LIMIT 60`,
+    [excludeId ?? null]
+  )
+  const picked = selectDiverseArticles(result.rows as ArticleRow[], MAX_COVERAGE_ITEMS)
+  if (picked.length === 0) return ''
+  return ['Latest coverage in the forum corpus:', ...picked.map(articleLine)].join('\n')
+}
+
+async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): Promise<string> {
+  const storiesResult = await query(
+    `SELECT id, title, short_summary, volume, score
+     FROM subtopics
+     WHERE cluster_key IS NOT NULL AND score > 0
+       AND updated_at > NOW() - INTERVAL '7 days'
+     ORDER BY score DESC, updated_at DESC
+     LIMIT $1`,
+    [topicLimit]
+  )
+  const stories = storiesResult.rows as StoryRow[]
+  if (stories.length === 0) return latestCoverage(excludeId)
+
+  const articleResult = await query(
+    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+     FROM articles
+     WHERE status = 'ready' AND subtopic_id = ANY($1::uuid[])
+       AND id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+     ORDER BY published_at DESC NULLS LAST`,
+    [stories.map((story) => story.id), excludeId ?? null]
+  )
+  const articles = articleResult.rows as ArticleRow[]
+  const lines: string[] = []
+  let remainingArticles = MAX_COVERAGE_ITEMS
+  let budget = COVERAGE_CLAMP
+
+  for (const story of stories) {
+    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, LEAD_CLAMP)}` : ''}`
+    if (storyLine.length + 1 > budget) break
+    lines.push(storyLine)
+    budget -= storyLine.length + 1
+
+    const storyArticles = selectDiverseArticles(
+      articles.filter((article) => article.subtopic_id === story.id),
+      Math.max(1, Math.min(3, remainingArticles))
+    )
+    for (const article of storyArticles) {
+      const line = articleLine(article)
+      if (line.length + 1 > budget) break
+      lines.push(line)
+      budget -= line.length + 1
+      remainingArticles--
+    }
+    if (remainingArticles <= 0) break
+  }
+  return lines.join('\n') || latestCoverage(excludeId)
 }
 
 // Top recent articles matching the seed text, one bullet line each.
@@ -139,12 +267,26 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   const lines: string[] = []
   let budget = COVERAGE_CLAMP
   for (const a of picked) {
-    const line = `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}: ${clamp(a.content ?? '', LEAD_CLAMP)}`
+    const line = articleLine(a)
     if (line.length + 1 > budget) break
     lines.push(line)
     budget -= line.length + 1
   }
   return lines.join('\n')
+}
+
+// Complete automatic corpus routing for forumAI. Specific questions use
+// relevance search; broad current-events prompts use the corpus's hot-story
+// index or newest articles, so callers never need to provide an article id.
+export async function corpusCoverage(
+  seedText: string,
+  excludeId?: string | null,
+  intentText = seedText
+): Promise<string> {
+  const intent = coverageIntent(intentText)
+  if (intent === 'top_story') return hotStoryCoverage(1, excludeId)
+  if (intent === 'latest') return hotStoryCoverage(3, excludeId)
+  return relatedCoverage(seedText, excludeId)
 }
 
 // The item the user is looking at when they tap "Ask forumAI" — becomes a

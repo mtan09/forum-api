@@ -102,7 +102,7 @@ Auth: `Authorization: Bearer <jwt>`. Errors: `{error: string}` with a meaningful
 
 ## forumAI
 
-`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over the app's own recent article corpus — related coverage is pulled by keyword overlap and injected as context, so answers reflect current events without an LLM in the scoring path. Passing `article_id` or `post_id` focuses the chat on that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
+`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over the app's own recent article corpus. Topic-specific prompts use keyword relevance; broad prompts about the biggest story or latest headlines automatically use the generated hot-story index and recent articles, so an `article_id` is not required. Retrieved coverage is balanced across source-lean bands when the corpus permits and injected as context without adding an LLM to retrieval or scoring. Passing `article_id` or `post_id` still pins the chat to that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
 
 ## Configuration and secrets
 
