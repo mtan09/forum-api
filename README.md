@@ -87,7 +87,7 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `GET /debates` · `/debates/recap` · `/debates/:id` | ✅ | Today's Floor rooms, yesterday's recap, one room + distribution |
 | `POST /debates/:id/vote` `{position: 0..1}` | ✅ | Drop / move your pin |
 | `POST /bookmarks/toggle` `{post_id?\|article_id?}` · `GET /bookmarks` | ✅ | Save/unsave; list saved posts + articles |
-| `GET /search?q=` | ✅ | Search users, sources, posts (+#hashtags), articles |
+| `GET /search?q=&topic_id=` | ✅ | Ranked article/post search with matching story clusters and full-corpus counts; `topic_id` opens the complete result set for a hot story |
 | `GET /sources/:name` | — | Source detail: rating, stats, content mix, recent coverage |
 | `GET /messages` · `/unread-count` · `/with/:userId` | ✅ | DM inbox, unread total, and a read-marking conversation thread |
 | `POST /messages/with/:userId` `{content}` | ✅ | Send a block-aware, rate-limited direct message |

@@ -137,6 +137,24 @@ const POSTS = [
     content: 'Fentanyl seizures at legal ports of entry dwarf what comes between them. If you care about the actual drug flow, fund the scanners. Boring answers save lives.' },
   { user: 22, hashtags: ['insurance', 'climate'],
     content: 'State Farm just non-renewed half my town. Climate risk is hitting your insurance bill years before it hits your ideology. The market is done debating.' },
+  // Major live stories need enough genuinely different community positions
+  // for search, summaries, and spectrum placement to feel representative.
+  // Keep these after the indexed comment fixtures above so their references
+  // remain stable.
+  { user: 15, hashtags: ['iran', 'warpowers', 'congress'],
+    content: 'The Iran war has no congressional authorization and no credible end state. Opposing an unauthorized Trump war is not isolationism; it is Congress doing the constitutional job it keeps surrendering.' },
+  { user: 17, hashtags: ['iran', 'warpowers', 'constitution'],
+    content: 'I want Iran deterred, but the Constitution does not contain a commander-in-chief exception for politically convenient wars. Congress must vote on this Iran war before another service member is sent into it.' },
+  { user: 23, hashtags: ['iran', 'security', 'military'],
+    content: 'Half-measures in the Iran war will cost more lives than decisive action. If the mission is to destroy the regime’s military capacity, say so, fund it, and finish it instead of managing escalation by press release.' },
+  { user: 11, hashtags: ['iran', 'civilians', 'diplomacy'],
+    content: 'Coverage of the Iran war keeps treating civilian deaths as a footnote to strategy. Diplomacy is not weakness when ordinary Iranian families are paying for decisions made by leaders in Tehran and Washington.' },
+  { user: 25, hashtags: ['iran', 'evidence', 'foreignpolicy'],
+    content: 'Before choosing a side on the Iran war, I want three facts the administration still has not supplied: the legal authority, the measurable objective, and the condition that ends U.S. involvement.' },
+  { user: 3, hashtags: ['iran', 'trump', 'nationaldefense'],
+    content: 'Trump is right that Iran cannot be allowed to threaten U.S. forces and allies without consequences. The Iran war should be judged by whether it restores deterrence, not by reflexive opposition to any use of American power.' },
+  { user: 30, hashtags: ['iran', 'veterans', 'warcosts'],
+    content: 'Every Iran war briefing talks about targets and timelines; almost none discuss the veterans the campaign will create. If Congress will not budget for lifelong care now, it has no business authorizing another open-ended war.' },
   ...STANCE_POSTS.map((post) => ({
     ...post,
     user: USERS.findIndex((user) => user.username === post.username),

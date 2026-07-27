@@ -27,11 +27,15 @@ topics.get('/', async (c) => {
 topics.get('/hot', async (c) => {
   const limit = Math.min(Number(c.req.query('limit')) || 8, 20)
   const result = await query(
-    `SELECT id, title, short_summary, keywords, volume, public_position, score
-     FROM subtopics
-     WHERE cluster_key IS NOT NULL AND score > 0
-       AND updated_at > NOW() - INTERVAL '7 days'
-     ORDER BY score DESC, updated_at DESC
+    `SELECT s.id, s.title, s.short_summary, s.keywords, s.volume,
+            s.public_position, s.score,
+            (SELECT count(*)::int
+             FROM articles a
+             WHERE a.subtopic_id = s.id AND a.status = 'ready') AS article_count
+     FROM subtopics s
+     WHERE s.cluster_key IS NOT NULL AND s.score > 0
+       AND s.updated_at > NOW() - INTERVAL '7 days'
+     ORDER BY s.score DESC, s.updated_at DESC
      LIMIT $1`,
     [limit]
   )
