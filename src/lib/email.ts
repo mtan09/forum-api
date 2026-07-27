@@ -10,7 +10,16 @@ type EmailInput = { to: string; subject: string; html: string }
 export async function sendEmail({ to, subject, html }: EmailInput): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
-    console.log(`[email:dev] to=${to} subject="${subject}"\n${html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()}`)
+    if (process.env.NODE_ENV === 'production') {
+      // Never print reset codes or verification links into production logs.
+      throw new Error('Email delivery is not configured')
+    }
+    console.log(
+      `[email:dev] to=${to} subject="${subject}"\n${html
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()}`
+    )
     return
   }
   const res = await fetch('https://api.resend.com/emails', {
@@ -39,6 +48,13 @@ const wrap = (body: string) => `
     <p style="color:#8D8D8D;font-size:12px;margin-top:24px">If you didn't request this, you can ignore this email.</p>
   </div>`
 
+const escapeHtml = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+
 export const verificationEmail = (link: string) => ({
   subject: 'Verify your forum email',
   html: wrap(`
@@ -52,4 +68,20 @@ export const resetEmail = (code: string) => ({
   html: wrap(`
     <p>Enter this code in the app to reset your password. It expires in 1 hour.</p>
     <p style="font-size:32px;font-weight:800;letter-spacing:6px;color:#B647FF">${code}</p>`),
+})
+
+export const notificationEmail = (
+  subject: string,
+  body: string,
+  link?: string
+) => ({
+  subject,
+  html: wrap(`
+    <p>${escapeHtml(body)}</p>
+    ${
+      link
+        ? `<p><a href="${link}" style="display:inline-block;background:#B647FF;color:#fff;padding:12px 24px;border-radius:12px;text-decoration:none;font-weight:700">Open forum</a></p>`
+        : ''
+    }
+    <p style="color:#5A5A5A;font-size:13px">You can change email notifications in Settings.</p>`),
 })

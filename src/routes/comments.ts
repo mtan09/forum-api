@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { notify } from '../lib/push'
+import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -110,6 +111,9 @@ comments.post('/', requireAuth, rateLimit({ name: 'createComment', windowMs: 60 
   let debateId = body?.debate_id ? String(body.debate_id) : null
 
   if (!content) return c.json({ error: 'Comment cannot be empty.' }, 400)
+  const moderation = await moderateText(c.get('userId'), 'comment', content)
+  const moderationError = moderationFailure(moderation)
+  if (moderationError) return c.json(moderationError.body, moderationError.status)
 
   // Replies inherit the parent's target so the two can never disagree
   if (parentId) {

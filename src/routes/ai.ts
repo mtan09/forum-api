@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import OpenAI from 'openai'
 import { articleSubject, corpusCoverage, postSubject } from '../ai/retrieval'
 import pool from '../db'
+import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -113,19 +114,6 @@ const aiBurstLimit = rateLimit({ name: 'aiChat', windowMs: 10 * 60_000, max: 15,
   message: 'forumAI needs a breather — try again in a few minutes.' })
 
 ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
-  const usage = await pool.query(
-    `INSERT INTO ai_usage (user_id, day, requests) VALUES ($1, CURRENT_DATE, 1)
-     ON CONFLICT (user_id, day) DO UPDATE SET requests = ai_usage.requests + 1
-     RETURNING requests`,
-    [c.get('userId')]
-  )
-  if (usage.rows[0].requests > AI_DAILY_LIMIT) {
-    return c.json(
-      { error: `You've hit today's forumAI limit (${AI_DAILY_LIMIT} questions). It resets tomorrow.` },
-      429
-    )
-  }
-
   if (!process.env.OPENAI_API_KEY) {
     return c.json(
       { error: 'AI chat is not configured — set OPENAI_API_KEY in the server .env.' },
@@ -138,6 +126,22 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
   const framing = String(body?.framing ?? 'General Audience')
   const history = Array.isArray(body?.history) ? (body.history as HistoryItem[]) : []
   if (!message) return c.json({ error: 'message is required.' }, 400)
+  const moderation = await moderateText(c.get('userId'), 'forumai_prompt', message)
+  const moderationError = moderationFailure(moderation)
+  if (moderationError) return c.json(moderationError.body, moderationError.status)
+
+  const usage = await pool.query(
+    `INSERT INTO ai_usage (user_id, day, requests) VALUES ($1, CURRENT_DATE, 1)
+     ON CONFLICT (user_id, day) DO UPDATE SET requests = ai_usage.requests + 1
+     RETURNING requests`,
+    [c.get('userId')]
+  )
+  if (usage.rows[0].requests > AI_DAILY_LIMIT) {
+    return c.json(
+      { error: `You've hit today's forumAI limit (${AI_DAILY_LIMIT} questions). It resets tomorrow.` },
+      429
+    )
+  }
 
   const articleId =
     typeof body?.article_id === 'string' && UUID_RE.test(body.article_id) ? body.article_id : null

@@ -4,7 +4,8 @@
 // re-runs no-ops for already-seen items.
 
 import { createHash } from 'node:crypto'
-import { query } from '../db'
+import pool, { query } from '../db'
+import { captureException, captureMessage } from '../lib/sentry'
 import { scoreArticle } from '../scoring/score'
 import { clusterAndPublish } from './cluster'
 import { extractArticleText } from './extract'
@@ -24,18 +25,59 @@ export type IngestStats = {
   inserted: number
   skippedDuplicate: number
   skippedIrrelevant: number
+  sourcesFailed: string[]
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+export function isDatabaseConnectionError(err: unknown) {
+  const value = err as { code?: string; message?: string }
+  return (
+    ['57P01', '57P02', '57P03', '08000', '08003', '08006', 'ECONNRESET', 'ETIMEDOUT'].includes(
+      String(value?.code ?? '')
+    ) ||
+    /connection|database.*timeout|terminat|ECONNRESET|socket/i.test(String(value?.message ?? ''))
+  )
+}
+
+export async function withRetry<T>(
+  label: string,
+  operation: () => Promise<T>,
+  shouldRetry: (err: unknown) => boolean,
+  attempts = 3
+): Promise<T> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation()
+    } catch (err) {
+      lastError = err
+      if (attempt === attempts || !shouldRetry(err)) throw err
+      const delay = 500 * 2 ** (attempt - 1)
+      console.warn(`[ingest] ${label} failed; retrying in ${delay}ms`)
+      await sleep(delay)
+    }
+  }
+  throw lastError
+}
+
+const dbQuery = (text: string, params?: unknown[]) =>
+  withRetry('database operation', () => query(text, params), isDatabaseConnectionError)
+
 async function ingestSource(source: Source, stats: IngestStats) {
+  let hadFeedFailure = false
   for (const feedUrl of source.feeds) {
     let items
     try {
-      items = await fetchFeed(feedUrl)
+      items = await withRetry(
+        `feed ${source.name}`,
+        () => fetchFeed(feedUrl),
+        () => true
+      )
       stats.feedsOk++
     } catch (err) {
       stats.feedsFailed++
+      hadFeedFailure = true
       console.warn(`[ingest] feed failed: ${(err as Error).message}`)
       continue
     }
@@ -48,7 +90,7 @@ async function ingestSource(source: Source, stats: IngestStats) {
       const contentHash = createHash('sha256')
         .update(`${source.name}::${item.title.toLowerCase()}`)
         .digest('hex')
-      const dup = await query(
+      const dup = await dbQuery(
         'SELECT 1 FROM articles WHERE url = $1 OR content_hash = $2 LIMIT 1',
         [item.url, contentHash]
       )
@@ -76,7 +118,7 @@ async function ingestSource(source: Source, stats: IngestStats) {
       // assigned afterwards by the clustering pass, not here
       const hashtags = toHashtags(extractKeywords(item.title, extracted.text).top)
 
-      await query(
+      const inserted = await dbQuery(
         `INSERT INTO articles
            (url, content_hash, title, source, content, media,
             political_lean, political_relevance, lean_confidence,
@@ -92,9 +134,12 @@ async function ingestSource(source: Source, stats: IngestStats) {
           topic.generalTopicId, hashtags, extracted.publishedAt,
         ]
       )
-      stats.inserted++
+      stats.inserted += inserted.rowCount ?? 0
       await sleep(250) // stay polite to article pages
     }
+  }
+  if (hadFeedFailure && !stats.sourcesFailed.includes(source.name)) {
+    stats.sourcesFailed.push(source.name)
   }
 }
 
@@ -102,31 +147,132 @@ export async function runIngest(): Promise<IngestStats> {
   const stats: IngestStats = {
     feedsOk: 0, feedsFailed: 0, seen: 0,
     inserted: 0, skippedDuplicate: 0, skippedIrrelevant: 0,
+    sourcesFailed: [],
   }
   const started = Date.now()
-  console.log(`[ingest] starting run across ${SOURCES.length} sources`)
-
-  for (const source of SOURCES) {
-    try {
-      await ingestSource(source, stats)
-    } catch (err) {
-      console.warn(`[ingest] source ${source.name} failed: ${(err as Error).message}`)
+  const lockClient = await pool.connect()
+  let runId: string | null = null
+  let locked = false
+  try {
+    const lock = await lockClient.query(
+      "SELECT pg_try_advisory_lock(hashtext('forum-hourly-ingest')) AS locked"
+    )
+    locked = !!lock.rows[0]?.locked
+    if (!locked) {
+      await query(
+        `INSERT INTO ingest_runs (status, completed_at, duration_ms)
+         VALUES ('skipped_locked', NOW(), 0)`
+      )
+      console.log('[ingest] another run holds the advisory lock; skipping')
+      return stats
     }
-  }
 
-  console.log(
-    `[ingest] done in ${Math.round((Date.now() - started) / 1000)}s — ` +
-    `${stats.inserted} inserted, ${stats.skippedDuplicate} duplicate, ` +
-    `${stats.skippedIrrelevant} irrelevant, ${stats.feedsFailed} feed(s) failed`
-  )
+    const run = await query(`INSERT INTO ingest_runs DEFAULT VALUES RETURNING id`)
+    runId = run.rows[0].id
+    console.log(`[ingest] starting run across ${SOURCES.length} sources`)
 
-  // Re-cluster whenever fresh articles arrived so hot topics stay current
-  if (stats.inserted > 0) {
-    try {
-      await clusterAndPublish()
-    } catch (err) {
-      console.warn(`[cluster] failed: ${(err as Error).message}`)
+    for (const source of SOURCES) {
+      try {
+        await withRetry(
+          `source ${source.name}`,
+          () => ingestSource(source, stats),
+          isDatabaseConnectionError
+        )
+      } catch (err) {
+        if (!stats.sourcesFailed.includes(source.name)) stats.sourcesFailed.push(source.name)
+        console.warn(`[ingest] source ${source.name} failed: ${(err as Error).message}`)
+      }
     }
+
+    // Re-cluster whenever fresh articles arrived so hot topics stay current.
+    if (stats.inserted > 0) await clusterAndPublish()
+
+    const status = stats.sourcesFailed.length || stats.feedsFailed ? 'partial' : 'success'
+    const duration = Date.now() - started
+    await query(
+      `UPDATE ingest_runs
+       SET status = $2, feeds_ok = $3, feeds_failed = $4, sources_failed = $5,
+           seen = $6, inserted = $7, skipped_duplicate = $8,
+           skipped_irrelevant = $9, completed_at = NOW(), duration_ms = $10
+       WHERE id = $1`,
+      [
+        runId,
+        status,
+        stats.feedsOk,
+        stats.feedsFailed,
+        stats.sourcesFailed,
+        stats.seen,
+        stats.inserted,
+        stats.skippedDuplicate,
+        stats.skippedIrrelevant,
+        duration,
+      ]
+    )
+
+    console.log(
+      `[ingest] done in ${Math.round(duration / 1000)}s — ` +
+        `${stats.inserted} inserted, ${stats.skippedDuplicate} duplicate, ` +
+        `${stats.skippedIrrelevant} irrelevant, ${stats.feedsFailed} feed(s) failed`
+    )
+
+    for (const source of stats.sourcesFailed) {
+      const repeated = await query(
+        `SELECT count(*)::int AS failures
+         FROM (
+           SELECT sources_failed FROM ingest_runs
+           WHERE status IN ('partial', 'failed')
+           ORDER BY started_at DESC LIMIT 3
+         ) recent
+         WHERE $1 = ANY(recent.sources_failed)`,
+        [source]
+      )
+      if (Number(repeated.rows[0]?.failures) >= 3) {
+        captureMessage(`Ingest source repeatedly failing: ${source}`, 'warning', { source })
+      }
+    }
+    const freshness = await query(
+      `SELECT max(COALESCE(published_at, created_at)) AS newest FROM articles WHERE status = 'ready'`
+    )
+    const newest = freshness.rows[0]?.newest
+      ? new Date(freshness.rows[0].newest).getTime()
+      : 0
+    if (!newest || Date.now() - newest > 8 * 60 * 60_000) {
+      captureMessage('Article corpus is stale after ingest', 'error', {
+        newest: freshness.rows[0]?.newest ?? null,
+      })
+    }
+    return stats
+  } catch (err: any) {
+    if (runId) {
+      await query(
+        `UPDATE ingest_runs
+         SET status = 'failed', error = $2, completed_at = NOW(), duration_ms = $3,
+             feeds_ok = $4, feeds_failed = $5, sources_failed = $6,
+             seen = $7, inserted = $8, skipped_duplicate = $9,
+             skipped_irrelevant = $10
+         WHERE id = $1`,
+        [
+          runId,
+          String(err?.message ?? err).slice(0, 500),
+          Date.now() - started,
+          stats.feedsOk,
+          stats.feedsFailed,
+          stats.sourcesFailed,
+          stats.seen,
+          stats.inserted,
+          stats.skippedDuplicate,
+          stats.skippedIrrelevant,
+        ]
+      ).catch(() => {})
+    }
+    captureException(err, { component: 'ingest' })
+    throw err
+  } finally {
+    if (locked) {
+      await lockClient
+        .query("SELECT pg_advisory_unlock(hashtext('forum-hourly-ingest'))")
+        .catch(() => {})
+    }
+    lockClient.release()
   }
-  return stats
 }

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { normalizeHashtags } from '../lib/hashtags'
 import { matchTopic } from '../ingest/topics'
+import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
@@ -35,8 +36,28 @@ posts.get('/', requireAuth, async (c) => {
   const feed = c.req.query('feed')
   const limit = Math.min(Number(c.req.query('limit')) || 100, 100)
   const offset = Math.max(Number(c.req.query('offset')) || 0, 0)
+  const viewerId = c.get('userId')
 
-  const params: unknown[] = [c.get('userId')]
+  if (authorId && authorId !== viewerId) {
+    const access = await query(
+      `SELECT u.is_private,
+              EXISTS(
+                SELECT 1 FROM follows f
+                WHERE f.follower_id = $1 AND f.followee_id = u.id AND f.status = 'accepted'
+              ) AS approved
+       FROM userdata u WHERE u.id = $2`,
+      [viewerId, authorId]
+    )
+    if (!access.rows[0]) return c.json({ error: 'User not found' }, 404)
+    if (access.rows[0].is_private && !access.rows[0].approved) {
+      return c.json(
+        { code: 'PRIVATE_PROFILE', error: 'Follow this private account to view its post history.' },
+        403
+      )
+    }
+  }
+
+  const params: unknown[] = [viewerId]
   const conditions: string[] = [NOT_BLOCKED, 'NOT p.hidden']
   if (topicId) {
     params.push(topicId)
@@ -47,7 +68,12 @@ posts.get('/', requireAuth, async (c) => {
     conditions.push(`p.user_id = $${params.length}`)
   }
   if (feed === 'following') {
-    conditions.push(`p.user_id IN (SELECT followee_id FROM follows WHERE follower_id = $1)`)
+    conditions.push(
+      `p.user_id IN (
+        SELECT followee_id FROM follows
+        WHERE follower_id = $1 AND status = 'accepted'
+      )`
+    )
   }
   const where = `WHERE ${conditions.join(' AND ')}`
   params.push(limit, offset)
@@ -74,6 +100,11 @@ posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_0
 
   if (!content && !mediaUrl) {
     return c.json({ error: 'Post needs text or an image.' }, 400)
+  }
+  if (content) {
+    const moderation = await moderateText(c.get('userId'), 'post', content)
+    const failure = moderationFailure(moderation)
+    if (failure) return c.json(failure.body, failure.status)
   }
 
   const hashtags = normalizeHashtags(body?.hashtags, content)
@@ -155,7 +186,7 @@ posts.post('/:id/vote', requireAuth, async (c) => {
         notify(row.owner_id, 'upvotes', {
           title: 'Your post got an upvote',
           body: `${row.voter} upvoted your post.`,
-          data: { url: `/post/${postId}` },
+          data: { url: `/post/${postId}`, post_id: postId },
         })
       }
     }

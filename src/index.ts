@@ -1,21 +1,18 @@
 import 'dotenv/config'
 import { serve } from '@hono/node-server'
-import * as Sentry from '@sentry/node'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 
 import pool from './db'
+import { captureException, initSentry } from './lib/sentry'
+import { processDeletionJobs } from './jobs/deletion'
+import { flushEmailDigests } from './lib/push'
 
-// Crash reporting: no-op until SENTRY_DSN is set in the environment.
-if (process.env.SENTRY_DSN) {
-  Sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 0.1 })
-  console.log('sentry enabled')
-}
+initSentry()
 
 import type { AppEnv } from './types'
 import { rateLimit } from './middleware/rateLimit'
-import { runIngest } from './ingest/pipeline'
 import adminRoutes from './routes/admin'
 import aiRoutes from './routes/ai'
 import authRoutes from './routes/auth'
@@ -23,6 +20,7 @@ import articlesRoutes from './routes/articles'
 import bookmarksRoutes from './routes/bookmarks'
 import commentsRoutes from './routes/comments'
 import debatesRoutes from './routes/debates'
+import feedbackRoutes from './routes/feedback'
 import legalRoutes from './routes/legal'
 import messagesRoutes from './routes/messages'
 import postsRoutes from './routes/posts'
@@ -57,7 +55,7 @@ app.get('/health', async (c) => {
 // and return a clean 500 instead of leaking internals.
 app.onError((err, c) => {
   console.error(`[error] ${c.req.method} ${c.req.path}:`, err)
-  if (process.env.SENTRY_DSN) Sentry.captureException(err)
+  captureException(err, { method: c.req.method, path: c.req.path })
   return c.json({ error: 'Something went wrong on our side.' }, 500)
 })
 
@@ -68,6 +66,7 @@ app.route('/topics',   topicsRoutes)
 app.route('/comments', commentsRoutes)
 app.route('/bookmarks', bookmarksRoutes)
 app.route('/debates',  debatesRoutes)
+app.route('/feedback', feedbackRoutes)
 app.route('/messages', messagesRoutes)
 app.route('/legal',    legalRoutes)
 app.route('/',         shareRoutes)
@@ -85,12 +84,14 @@ serve({ fetch: app.fetch, port }, () => {
   console.log(`forum-api running on port ${port}`)
 })
 
-// Optional in-process news ingestion. Set INGEST_INTERVAL_MINUTES to
-// refresh the article feed on a timer; unset = manual `npm run ingest`.
-const ingestMinutes = Number(process.env.INGEST_INTERVAL_MINUTES)
-if (Number.isFinite(ingestMinutes) && ingestMinutes > 0) {
-  const safeRun = () => runIngest().catch((err: unknown) => console.error('[ingest]', err))
-  setTimeout(safeRun, 15_000) // small delay so dev restarts don't hammer feeds
-  setInterval(safeRun, ingestMinutes * 60_000)
-  console.log(`news ingestion scheduled every ${ingestMinutes} min`)
-}
+// Small durable-job pump for email coalescing and account-media cleanup.
+// News ingestion intentionally does not run here; Railway owns that schedule.
+const runBackgroundJobs = () =>
+  Promise.all([processDeletionJobs(), flushEmailDigests()]).catch((err) => {
+    console.error('[jobs] background run failed:', err)
+    captureException(err, { component: 'background-jobs' })
+  })
+const initialJobsTimer = setTimeout(runBackgroundJobs, 10_000)
+const jobsTimer = setInterval(runBackgroundJobs, 5 * 60_000)
+initialJobsTimer.unref()
+jobsTimer.unref()

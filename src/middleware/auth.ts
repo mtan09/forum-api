@@ -4,18 +4,13 @@ import { query } from '../db'
 import { jwtSecret } from '../lib/auth'
 import type { AppEnv } from '../types'
 
-// Banned users keep a valid JWT until it expires, so bans are enforced
-// here. Cached for a minute per user to avoid a DB hit on every request.
-const banCache = new Map<string, { at: number; banned: boolean }>()
-const BAN_TTL_MS = 60_000
-
-async function isBanned(userId: string): Promise<boolean> {
-  const cached = banCache.get(userId)
-  if (cached && Date.now() - cached.at < BAN_TTL_MS) return cached.banned
+// JWTs are intentionally stateless, but every authenticated request still
+// resolves the account. That makes deletion and suspension effective
+// immediately even when a previously issued token has weeks left.
+async function accountState(userId: string): Promise<'active' | 'banned' | 'missing'> {
   const result = await query('SELECT is_banned FROM userdata WHERE id = $1', [userId])
-  const banned = !!result.rows[0]?.is_banned
-  banCache.set(userId, { at: Date.now(), banned })
-  return banned
+  if (!result.rows[0]) return 'missing'
+  return result.rows[0].is_banned ? 'banned' : 'active'
 }
 
 // Sets userId when a valid token is present, but never rejects — for
@@ -27,7 +22,9 @@ export const optionalAuth = createMiddleware<AppEnv>(async (c, next) => {
   if (token) {
     try {
       const payload = await verify(token, jwtSecret(), 'HS256')
-      if (typeof payload.sub === 'string') c.set('userId', payload.sub)
+      if (typeof payload.sub === 'string' && (await accountState(payload.sub)) === 'active') {
+        c.set('userId', payload.sub)
+      }
     } catch {
       // invalid token on a public route: proceed anonymously
     }
@@ -46,7 +43,11 @@ export const requireAuth = createMiddleware<AppEnv>(async (c, next) => {
   try {
     const payload = await verify(token, jwtSecret(), 'HS256')
     if (typeof payload.sub !== 'string') throw new Error('missing sub')
-    if (await isBanned(payload.sub)) {
+    const state = await accountState(payload.sub)
+    if (state === 'missing') {
+      return c.json({ error: 'This account no longer exists.' }, 401)
+    }
+    if (state === 'banned') {
       return c.json({ error: 'This account has been suspended.' }, 403)
     }
     c.set('userId', payload.sub)

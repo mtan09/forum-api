@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { query } from '../db'
+import { signedFeedbackUrl } from '../lib/r2'
 import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
 
@@ -86,6 +87,124 @@ admin.post('/reports/:id/resolve', async (c) => {
     [c.req.param('id'), status, c.get('userId')]
   )
   return c.json({ ok: true, action })
+})
+
+// Structured beta feedback queue. Screenshot URLs are minted only for an
+// authenticated admin and expire after five minutes.
+admin.get('/feedback', async (c) => {
+  const status = c.req.query('status') ?? 'open'
+  if (!['open', 'planned', 'resolved', 'dismissed'].includes(status)) {
+    return c.json({ error: 'Invalid feedback status.' }, 400)
+  }
+  const result = await query(
+    `SELECT f.*, u.username
+     FROM beta_feedback f
+     LEFT JOIN userdata u ON u.id = f.user_id
+     WHERE f.status = $1
+     ORDER BY f.created_at DESC
+     LIMIT 200`,
+    [status]
+  )
+  return c.json(result.rows)
+})
+
+admin.patch('/feedback/:id', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const status = body?.status === undefined ? null : String(body.status)
+  const notes = body?.admin_notes === undefined ? null : String(body.admin_notes).slice(0, 5000)
+  if (status && !['open', 'planned', 'resolved', 'dismissed'].includes(status)) {
+    return c.json({ error: 'Invalid feedback status.' }, 400)
+  }
+  const result = await query(
+    `UPDATE beta_feedback
+     SET status = COALESCE($2, status),
+         admin_notes = COALESCE($3, admin_notes),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [c.req.param('id'), status, notes]
+  )
+  if (!result.rows[0]) return c.json({ error: 'Feedback not found.' }, 404)
+  return c.json(result.rows[0])
+})
+
+admin.get('/feedback/:id/screenshot', async (c) => {
+  const result = await query('SELECT screenshot_key FROM beta_feedback WHERE id = $1', [
+    c.req.param('id'),
+  ])
+  const key = result.rows[0]?.screenshot_key
+  if (!key) return c.json({ error: 'Screenshot not found.' }, 404)
+  try {
+    return c.json({ url: await signedFeedbackUrl(key, 300), expires_in: 300 })
+  } catch {
+    return c.json({ error: 'Private screenshot storage is unavailable.' }, 503)
+  }
+})
+
+admin.get('/moderation/review', async (c) => {
+  const result = await query(
+    `SELECT m.id, m.surface, m.provider, m.model, m.categories,
+            m.target_kind, m.target_id, m.created_at,
+            CASE m.target_kind
+              WHEN 'post' THEN (SELECT left(p.content, 300) FROM posts p WHERE p.id::text = m.target_id)
+              WHEN 'comment' THEN (SELECT left(cm.content, 300) FROM comments cm WHERE cm.id::text = m.target_id)
+              WHEN 'dm' THEN '[private message — content not retained in moderation audit]'
+            END AS target_preview
+     FROM moderation_audits m
+     WHERE m.decision = 'review'
+     ORDER BY m.created_at DESC
+     LIMIT 200`
+  )
+  return c.json(result.rows)
+})
+
+admin.post('/moderation/:id/resolve', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const action = String(body?.action ?? '')
+  if (!['keep', 'hide'].includes(action)) {
+    return c.json({ error: "action must be 'keep' or 'hide'." }, 400)
+  }
+  const audit = await query(
+    `SELECT target_kind, target_id FROM moderation_audits
+     WHERE id = $1 AND decision = 'review'`,
+    [c.req.param('id')]
+  )
+  const row = audit.rows[0]
+  if (!row) return c.json({ error: 'Moderation review not found.' }, 404)
+  if (action === 'hide') {
+    if (row.target_kind === 'post') {
+      await query('UPDATE posts SET hidden = TRUE WHERE id::text = $1', [row.target_id])
+    } else if (row.target_kind === 'comment') {
+      await query('UPDATE comments SET hidden = TRUE WHERE id::text = $1', [row.target_id])
+    } else {
+      return c.json({ error: 'This review target cannot be hidden automatically.' }, 400)
+    }
+  }
+  await query(
+    `UPDATE moderation_audits SET decision = $2 WHERE id = $1`,
+    [c.req.param('id'), action === 'hide' ? 'reject' : 'allow']
+  )
+  return c.json({ ok: true, action })
+})
+
+admin.get('/ingest-status', async (c) => {
+  const result = await query(
+    `SELECT id, status, feeds_ok, feeds_failed, sources_failed, seen, inserted,
+            skipped_duplicate, skipped_irrelevant, error, started_at,
+            completed_at, duration_ms
+     FROM ingest_runs
+     ORDER BY started_at DESC
+     LIMIT 30`
+  )
+  const latestSuccess = await query(
+    `SELECT completed_at FROM ingest_runs
+     WHERE status IN ('success', 'partial') AND completed_at IS NOT NULL
+     ORDER BY completed_at DESC LIMIT 1`
+  )
+  return c.json({
+    runs: result.rows,
+    last_success_at: latestSuccess.rows[0]?.completed_at ?? null,
+  })
 })
 
 export default admin

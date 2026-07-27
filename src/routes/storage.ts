@@ -4,6 +4,7 @@ import { join } from 'path'
 import { Hono } from 'hono'
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3'
 import sharp from 'sharp'
+import { moderateImage, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -81,6 +82,21 @@ storage.post('/upload', requireAuth, rateLimit({ name: 'upload', windowMs: 60 * 
       return c.json({ error: 'That file does not look like a valid image.' }, 400)
     }
   }
+
+  let moderationBytes = body
+  if (outType !== 'image/jpeg') {
+    try {
+      moderationBytes = await sharp(body, { failOn: 'error' })
+        .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 80 })
+        .toBuffer()
+    } catch {
+      return c.json({ error: 'That file does not look like a valid image.' }, 400)
+    }
+  }
+  const moderation = await moderateImage(c.get('userId'), moderationBytes, 'image/jpeg')
+  const moderationError = moderationFailure(moderation)
+  if (moderationError) return c.json(moderationError.body, moderationError.status)
 
   const key = `${c.get('userId')}/${Date.now()}.${outExt}`
 

@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import pool from '../db'
 import { hashPassword, issueToken, verifyPassword } from '../lib/auth'
 import { resetEmail, sendEmail, verificationEmail } from '../lib/email'
+import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -54,6 +55,9 @@ auth.post('/signup', signupLimit, async (c) => {
   if (password.length < 6) {
     return c.json({ error: 'Password must be at least 6 characters.' }, 400)
   }
+  const moderation = await moderateText(null, 'username', username)
+  const moderationError = moderationFailure(moderation)
+  if (moderationError) return c.json(moderationError.body, moderationError.status)
 
   const userId = randomUUID()
   const passwordHash = await hashPassword(password)
@@ -100,7 +104,7 @@ auth.post('/login', loginLimit, async (c) => {
 
   const result = await pool.query(
     `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at,
-            a.email, a.password_hash
+            u.is_banned, a.email, a.password_hash
      FROM auth_credentials a
      JOIN userdata u ON u.id = a.user_id
      WHERE a.email = $1`,
@@ -112,8 +116,11 @@ auth.post('/login', loginLimit, async (c) => {
   if (!valid) {
     return c.json({ error: 'Invalid email or password.' }, 401)
   }
+  if (row.is_banned) {
+    return c.json({ error: 'This account has been suspended.' }, 403)
+  }
 
-  const { password_hash: _hash, ...user } = row
+  const { password_hash: _hash, is_banned: _banned, ...user } = row
   const token = await issueToken(user.id)
   return c.json({ token, user })
 })

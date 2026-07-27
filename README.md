@@ -10,12 +10,12 @@ Backend for the forum app (`../forum`). Hono + Postgres, self-managed JWT auth, 
 | Database | Local homebrew Postgres, db `forum` | Neon — swap `DATABASE_URL` |
 | Auth | Email+password, scrypt hashes, HS256 JWTs (30-day) | Same |
 | Storage | `./uploads` on disk, served at `/storage/files/*` | Cloudflare R2 — set the `R2_*` vars |
-| News + scoring | `npm run ingest` (or `INGEST_INTERVAL_MINUTES` timer) | Same — no external APIs or keys needed |
+| News + scoring | `npm run ingest` | Dedicated hourly Railway cron with locking, retries, and persistent run status |
 | AI chat | `POST /ai/chat` streamed (SSE) via OpenAI (`gpt-5.4-nano`) | Set `OPENAI_API_KEY` |
 
 ## News ingestion, bias scoring & hot-topic clustering
 
-The article feed is real: `src/ingest/` pulls RSS from ~59 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept ~even between left/center/right), extracts full text, dedupes by URL/content hash, gates on political relevance, auto-derives hashtags and a background general topic, scores, and inserts as `ready`. Run once with `npm run ingest`, or set `INGEST_INTERVAL_MINUTES` to refresh on a timer while the server runs.
+The article feed is real: `src/ingest/` pulls RSS from ~59 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept ~even between left/center/right), extracts full text, dedupes by URL/content hash, gates on political relevance, auto-derives hashtags and a background general topic, scores, and inserts as `ready`. Run once with `npm run ingest`. Production runs the same command in a dedicated hourly Railway cron service; the API process never schedules ingestion.
 
 Publisher data is treated as untrusted. Image selection prefers a feed's canonical enclosure, validates every source with the same URL rules, rejects malformed article-URL-plus-caption metadata, and falls back to a valid page image. Full-text extraction rejects timestamp-heavy video-player/navigation rails from any publisher and falls back to the cleaner RSS text instead, so unrelated video headlines do not pollute scoring or story summaries.
 
@@ -34,9 +34,13 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
 - **User spectrum (`/users/:id/spectrum`)** is computed from activity, never self-declared: each scored post contributes its position at weight 3, each upvote contributes the voted content's lean at weight 1, each downvote the *mirror* of that lean. Votes on one's own posts are excluded. `/users/me/spectrum/history` replays the same math at each recent month-end for the profile trajectory sparkline.
 - **The Floor (`/debates`)** auto-picks up to 6 daily rooms from the story clusters — `biggest` (top-scored), `contested` (deepest coverage from *both* wings), and `trending` fill — generated lazily and topped up per request. Users pin a position (`POST /debates/:id/vote`), which unlocks a 10-bin distribution + median and a shared thread. `GET /debates/recap` returns yesterday's rooms with their final numbers. The Floor's "day" is anchored to `America/New_York` so UTC rollover doesn't blank the evening's rooms.
-- **Moderation** — `POST /reports` flags a post/article/comment/user (one live report per reporter per target); `POST`/`DELETE /users/:id/block` are one-directional blocks enforced in read queries (feed, comments, search, DMs); `GET /users/me/blocks` lists them. Admins (`userdata.is_admin`) review reports via `/admin/reports` and resolve with hide (content vanishes from all reads), ban (`is_banned` accounts are locked out at the auth layer), or dismiss.
-- **Social** — one-directional follows (`POST`/`DELETE /users/:id/follow`, `GET /posts?feed=following`) and pair-keyed DMs (`/messages` inbox with unread counts, `/messages/with/:userId` threads) with push notifications on send.
-- **Hardening** — sliding-window rate limits on every sensitive route (auth, uploads, posting, AI), a persistent per-user daily forumAI budget (`ai_usage`), email verification + reset codes (Resend, console fallback in dev), uploads re-encoded to bounded JPEGs with EXIF stripped, GIN-indexed full-text search, and env-gated Sentry + a DB-checking `/health`.
+- **Pre-publication moderation** — posts, comments, DMs, usernames, bios, forumAI prompts, and user images pass narrow deterministic hard stops followed by `omni-moderation-latest`. Images are checked before R2 upload. Provider outage fails closed with a retryable 503; rejection uses a neutral 422. Audits retain only hashes and decision metadata, never rejected raw content. Publisher articles are excluded.
+- **Reports and blocks** — `POST /reports` flags a post/article/comment/user; blocks are enforced in feeds, comments, search, follows, and DMs. Admins review reports and separately resolve flagged mock-corpus moderation records.
+- **Private accounts** — follows have pending/accepted states. Unapproved visitors see basic profile identity and spectrum but not collected Posts/Comments/Upvoted/Saved history; individually encountered content remains eligible for feeds, search, and threads. Blocking removes follow relationships.
+- **Notifications** — Push and Email preferences exist per replies/upvotes/DMs/follows. Email delivery is globally opt-in and requires a verified address; replies and DMs send immediately and upvotes coalesce per post.
+- **Hardening** — every authenticated request re-resolves the user, so deleted or banned accounts invalidate old JWTs immediately. Sliding-window rate limits protect sensitive routes, uploads are re-encoded with EXIF stripped, Sentry redacts PII/tokens, and `/health` checks Postgres.
+- **Deletion and feedback** — account deletion transactionally enqueues public/private R2 cleanup with retries and a 24-hour alert. Structured beta feedback stores device/build context and optional screenshots in a separate private bucket; only admins receive short-lived signed URLs.
+- **Reliable ingestion** — a Postgres advisory lock prevents overlap, database and per-source failures retry independently, clustering remains in the successful flow, and `ingest_runs` records totals, failures, duration, and freshness.
 
 ## Getting started
 
@@ -53,7 +57,9 @@ npm run ingest                                   # fetch + score real news into 
 npm run audit:posts                              # read-only scorer audit over stored posts
 ```
 
-Dev logins after seeding: `john@example.dev` / `jane@example.dev` / `alice@example.dev`, password `password123` (john is an admin in dev).
+Local seed accounts are development fixtures only. Set or rotate their
+passwords locally after seeding; production and App Review credentials must
+never be written in this repository.
 
 `npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image validation, extracted-content quality, and bounded summary leads); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
@@ -72,9 +78,11 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `GET /users/me/spectrum` · `/history` | ✅ | Computed political placement + monthly trajectory |
 | `GET /users/me/posts` · `/comments` · `/upvoted` | ✅ | Own content for the profile tabs |
 | `GET /users?ids=` · `GET /users/:id` · `GET /users/:id/spectrum` | ✅ | Public profiles, follow/block state, counts, and computed spectrum |
-| `GET /users/me/suggested` · `POST`/`DELETE /users/:id/follow` | ✅ | Onboarding suggestions and follow/unfollow |
+| `GET /users/me/suggested` · `POST`/`DELETE /users/:id/follow` | ✅ | Follow, request, cancel, or unfollow |
+| `GET /users/me/follow-requests` · `POST /users/follow-requests/:id/accept` · `/decline` | ✅ | List and resolve incoming private-account requests |
+| `DELETE /users/:id/follower` | ✅ | Remove an accepted follower |
 | `POST`/`DELETE /users/me/push-token` | ✅ | Register or remove an Expo push token |
-| `GET`/`PUT /users/me/notification-prefs` | ✅ | Read or update server-enforced push preferences |
+| `GET`/`PUT /users/me/notification-prefs` | ✅ | Channel/event preferences; accepts the legacy flat push shape during migration |
 | `POST`/`DELETE /users/:id/block` · `GET /users/me/blocks` | ✅ | Block / unblock / list blocked users |
 | `GET /posts?topic_id=&user_id=&feed=following&limit=&offset=` | ✅ | Paginated feed (author + vote joined, blocked/hidden content filtered) |
 | `POST /posts` `{content,media_url?,hashtags?}` | ✅ | Create post (spectrum position computed server-side) |
@@ -93,6 +101,10 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `POST /messages/with/:userId` `{content}` | ✅ | Send a block-aware, rate-limited direct message |
 | `POST /reports` `{target_kind,target_id,reason,detail?}` | ✅ | Flag a post/article/comment/user |
 | `GET /admin/reports` · `POST /admin/reports/:id/resolve` | Admin | Review reports; hide, ban, or dismiss |
+| `POST /feedback` · `POST /feedback/screenshot` | ✅ | Create structured beta feedback and optional private screenshot |
+| `GET /admin/feedback` · `PATCH /admin/feedback/:id` | Admin | Triage feedback, status, and notes |
+| `GET /admin/moderation` · `POST /admin/moderation/:id/resolve` | Admin | Review flagged existing-corpus records |
+| `GET /admin/ingest-status` | Admin | Recent ingest runs, freshness, and source failures |
 | `POST /storage/upload?filename=x.jpg` (raw bytes) | ✅ | Image upload → `{url}` (disk in dev, R2 when configured) |
 | `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream, grounded in the article corpus |
 | `GET /legal/terms` · `/legal/privacy` | — | Public legal pages |
@@ -110,17 +122,19 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 
 - Required: `DATABASE_URL`, a strong `JWT_SECRET`
 - forumAI: `OPENAI_API_KEY`, optional `AI_DAILY_LIMIT`
-- Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`
-- Email: `RESEND_API_KEY`, `EMAIL_FROM`, `LEGAL_CONTACT_EMAIL`
-- Observability: optional `SENTRY_DSN`
+- Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`; private feedback additionally requires `R2_FEEDBACK_BUCKET_NAME`
+- Email: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`, `LEGAL_CONTACT_EMAIL`, and `WEB_APP_URL`
+- Observability: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`; external beta remains blocked without working Sentry
 
 TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is removed from the parsed database URL so `pg` cannot silently reinterpret it after a driver upgrade; local hosts remain non-TLS and remote hosts use the configured TLS object.
 
 ## Going to production
 
-1. `neonctl projects create forum` → set `DATABASE_URL`, run `schema.sql` + `migrations/*.sql` + `seed.sql` against it (`scripts/setup.mjs` automates Neon + R2 provisioning).
-2. Create an R2 bucket, enable public access, fill in the `R2_*` vars.
-3. Set `OPENAI_API_KEY` for AI chat.
-4. Deploy (e.g. `railway init && railway up`) and point the app at it via `EXPO_PUBLIC_API_URL`.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 revokes the documented demo login while retaining its authored content.
+2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
+3. Deploy the API with `/health` as the Railway health check.
+4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.
+5. Set `OPENAI_API_KEY`, an explicit `AI_DAILY_LIMIT`, and Sentry. Configure Resend only after a permanent sending domain has SPF/DKIM/DMARC.
+6. Create owner/admin and non-admin reviewer accounts with `npm run account:release`; credentials belong in a password manager/App Store Connect, never this repository.
 
 The Expo app auto-derives the API URL from the Metro dev-server host in development, so a phone on the same Wi-Fi works with zero config.

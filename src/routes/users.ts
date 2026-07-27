@@ -1,16 +1,19 @@
 import { Hono } from 'hono'
-import { query } from '../db'
+import pool, { query } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { moderateText, moderationFailure } from '../lib/moderation'
+import { notify } from '../lib/push'
 import type { AppEnv } from '../types'
 
 const users = new Hono<AppEnv>()
 
-const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, created_at'
+const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, is_private, created_at'
 
 // GET /users/me — current user's profile including email
 users.get('/me', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at, u.is_admin, a.email, a.email_verified
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private,
+            u.created_at, u.is_admin, a.email, a.email_verified
      FROM userdata u
      LEFT JOIN auth_credentials a ON a.user_id = u.id
      WHERE u.id = $1`,
@@ -25,7 +28,7 @@ users.patch('/me', requireAuth, async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body) return c.json({ error: 'Invalid body' }, 400)
 
-  const fields: Record<string, string | null> = {}
+  const fields: Record<string, string | boolean | null> = {}
   if (body.username !== undefined) {
     const username = String(body.username).trim()
     if (username.length < 3 || username.length > 24) {
@@ -36,8 +39,16 @@ users.patch('/me', requireAuth, async (c) => {
   for (const key of ['bio', 'avatar_url', 'header_url'] as const) {
     if (body[key] !== undefined) fields[key] = body[key] === null ? null : String(body[key])
   }
+  if (body.is_private !== undefined) fields.is_private = !!body.is_private
   if (Object.keys(fields).length === 0) {
     return c.json({ error: 'Nothing to update' }, 400)
+  }
+  for (const key of ['username', 'bio'] as const) {
+    if (typeof fields[key] === 'string' && fields[key]) {
+      const moderation = await moderateText(c.get('userId'), key, fields[key] as string)
+      const moderationError = moderationFailure(moderation)
+      if (moderationError) return c.json(moderationError.body, moderationError.status)
+    }
   }
 
   const keys = Object.keys(fields)
@@ -244,29 +255,100 @@ users.delete('/me/push-token', requireAuth, async (c) => {
 users.get('/me/notification-prefs', requireAuth, async (c) => {
   const result = await query(
     `SELECT COALESCE(p.push_enabled, TRUE) AS push_enabled,
-            COALESCE(p.replies, TRUE) AS replies,
-            COALESCE(p.upvotes, TRUE) AS upvotes,
-            COALESCE(p.dms, TRUE) AS dms
-     FROM userdata u LEFT JOIN notification_prefs p ON p.user_id = u.id
+            COALESCE(p.email_enabled, FALSE) AS email_enabled,
+            COALESCE(p.push_replies, TRUE) AS push_replies,
+            COALESCE(p.push_upvotes, TRUE) AS push_upvotes,
+            COALESCE(p.push_dms, TRUE) AS push_dms,
+            COALESCE(p.push_follows, TRUE) AS push_follows,
+            COALESCE(p.email_replies, TRUE) AS email_replies,
+            COALESCE(p.email_upvotes, FALSE) AS email_upvotes,
+            COALESCE(p.email_dms, TRUE) AS email_dms,
+            COALESCE(p.email_follows, FALSE) AS email_follows,
+            COALESCE(p.push_replies, TRUE) AS replies,
+            COALESCE(p.push_upvotes, TRUE) AS upvotes,
+            COALESCE(p.push_dms, TRUE) AS dms,
+            COALESCE(a.email_verified, FALSE) AS email_verified
+     FROM userdata u
+     LEFT JOIN notification_prefs p ON p.user_id = u.id
+     LEFT JOIN auth_credentials a ON a.user_id = u.id
      WHERE u.id = $1`,
     [c.get('userId')]
   )
-  return c.json(result.rows[0] ?? { push_enabled: true, replies: true, upvotes: true, dms: true })
+  return c.json(
+    result.rows[0] ?? {
+      push_enabled: true,
+      email_enabled: false,
+      push_replies: true,
+      push_upvotes: true,
+      push_dms: true,
+      push_follows: true,
+      email_replies: true,
+      email_upvotes: false,
+      email_dms: true,
+      email_follows: false,
+      replies: true,
+      upvotes: true,
+      dms: true,
+      email_verified: false,
+    }
+  )
 })
 
 users.put('/me/notification-prefs', requireAuth, async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body) return c.json({ error: 'Invalid body' }, 400)
+  if (body.email_enabled === true) {
+    const verification = await query(
+      'SELECT email_verified FROM auth_credentials WHERE user_id = $1',
+      [c.get('userId')]
+    )
+    if (!verification.rows[0]?.email_verified) {
+      return c.json(
+        { code: 'EMAIL_NOT_VERIFIED', error: 'Verify your email before enabling email notifications.' },
+        403
+      )
+    }
+  }
   const val = (key: string) => (body[key] === undefined ? null : !!body[key])
+  const legacy = (event: 'replies' | 'upvotes' | 'dms') =>
+    body[`push_${event}`] === undefined ? val(event) : val(`push_${event}`)
   await query(
-    `INSERT INTO notification_prefs (user_id, push_enabled, replies, upvotes, dms)
-     VALUES ($1, COALESCE($2, TRUE), COALESCE($3, TRUE), COALESCE($4, TRUE), COALESCE($5, TRUE))
+    `INSERT INTO notification_prefs
+       (user_id, push_enabled, email_enabled, replies, upvotes, dms,
+        push_replies, push_upvotes, push_dms, push_follows,
+        email_replies, email_upvotes, email_dms, email_follows)
+     VALUES
+       ($1, COALESCE($2, TRUE), COALESCE($3, FALSE),
+        COALESCE($4, TRUE), COALESCE($5, TRUE), COALESCE($6, TRUE),
+        COALESCE($4, TRUE), COALESCE($5, TRUE), COALESCE($6, TRUE), COALESCE($7, TRUE),
+        COALESCE($8, TRUE), COALESCE($9, FALSE), COALESCE($10, TRUE), COALESCE($11, FALSE))
      ON CONFLICT (user_id) DO UPDATE SET
        push_enabled = COALESCE($2, notification_prefs.push_enabled),
-       replies      = COALESCE($3, notification_prefs.replies),
-       upvotes      = COALESCE($4, notification_prefs.upvotes),
-       dms          = COALESCE($5, notification_prefs.dms)`,
-    [c.get('userId'), val('push_enabled'), val('replies'), val('upvotes'), val('dms')]
+       email_enabled = COALESCE($3, notification_prefs.email_enabled),
+       replies = COALESCE($4, notification_prefs.replies),
+       upvotes = COALESCE($5, notification_prefs.upvotes),
+       dms = COALESCE($6, notification_prefs.dms),
+       push_replies = COALESCE($4, notification_prefs.push_replies),
+       push_upvotes = COALESCE($5, notification_prefs.push_upvotes),
+       push_dms = COALESCE($6, notification_prefs.push_dms),
+       push_follows = COALESCE($7, notification_prefs.push_follows),
+       email_replies = COALESCE($8, notification_prefs.email_replies),
+       email_upvotes = COALESCE($9, notification_prefs.email_upvotes),
+       email_dms = COALESCE($10, notification_prefs.email_dms),
+       email_follows = COALESCE($11, notification_prefs.email_follows)`,
+    [
+      c.get('userId'),
+      val('push_enabled'),
+      val('email_enabled'),
+      legacy('replies'),
+      legacy('upvotes'),
+      legacy('dms'),
+      val('push_follows'),
+      val('email_replies'),
+      val('email_upvotes'),
+      val('email_dms'),
+      val('email_follows'),
+    ]
   )
   return c.json({ ok: true })
 })
@@ -277,14 +359,26 @@ users.post('/:id/block', requireAuth, async (c) => {
   if (targetId === c.get('userId')) {
     return c.json({ error: 'You cannot block yourself.' }, 400)
   }
+  const client = await pool.connect()
   try {
-    await query(
+    await client.query('BEGIN')
+    await client.query(
       'INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
       [c.get('userId'), targetId]
     )
+    await client.query(
+      `DELETE FROM follows
+       WHERE (follower_id = $1 AND followee_id = $2)
+          OR (follower_id = $2 AND followee_id = $1)`,
+      [c.get('userId'), targetId]
+    )
+    await client.query('COMMIT')
   } catch (err: any) {
+    await client.query('ROLLBACK')
     if (err?.code === '23503') return c.json({ error: 'User not found' }, 404)
     throw err
+  } finally {
+    client.release()
   }
   return c.json({ blocked: true })
 })
@@ -392,7 +486,23 @@ users.get('/me/upvoted', requireAuth, async (c) => {
 // DELETE /users/me — permanently delete the account; posts, comments and
 // votes cascade via foreign keys.
 users.delete('/me', requireAuth, async (c) => {
-  await query('DELETE FROM userdata WHERE id = $1', [c.get('userId')])
+  const userId = c.get('userId')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `INSERT INTO deletion_jobs (deleted_user_id, public_prefix, feedback_prefix)
+       VALUES ($1, $2, $3)`,
+      [userId, `${userId}/`, `feedback/${userId}/`]
+    )
+    await client.query('DELETE FROM userdata WHERE id = $1', [userId])
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
   return c.json({ ok: true })
 })
 
@@ -410,14 +520,78 @@ users.get('/', requireAuth, async (c) => {
   return c.json(result.rows)
 })
 
+// GET /users/me/follow-requests — pending requests received by a private
+// account. Public accounts normally have no pending rows.
+users.get('/me/follow-requests', requireAuth, async (c) => {
+  const result = await query(
+    `SELECT u.id, u.username, u.avatar_url, u.bio, f.created_at AS requested_at
+     FROM follows f
+     JOIN userdata u ON u.id = f.follower_id
+     WHERE f.followee_id = $1 AND f.status = 'pending'
+       AND NOT EXISTS(
+         SELECT 1 FROM blocks b
+         WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+            OR (b.blocker_id = u.id AND b.blocked_id = $1)
+       )
+     ORDER BY f.created_at DESC`,
+    [c.get('userId')]
+  )
+  return c.json(result.rows)
+})
+
+users.post('/follow-requests/:followerId/accept', requireAuth, async (c) => {
+  const result = await query(
+    `UPDATE follows
+     SET status = 'accepted', responded_at = NOW()
+     WHERE follower_id = $1 AND followee_id = $2 AND status = 'pending'
+     RETURNING follower_id`,
+    [c.req.param('followerId'), c.get('userId')]
+  )
+  if (!result.rows[0]) return c.json({ error: 'Follow request not found.' }, 404)
+  const me = await query('SELECT username FROM userdata WHERE id = $1', [c.get('userId')])
+  notify(result.rows[0].follower_id, 'follows', {
+    title: 'Follow request accepted',
+    body: `${me.rows[0]?.username ?? 'This account'} accepted your follow request.`,
+    data: { url: `/user/${c.get('userId')}` },
+  })
+  return c.json({ ok: true, follow_status: 'accepted' })
+})
+
+users.post('/follow-requests/:followerId/decline', requireAuth, async (c) => {
+  const result = await query(
+    `DELETE FROM follows
+     WHERE follower_id = $1 AND followee_id = $2 AND status = 'pending'
+     RETURNING follower_id`,
+    [c.req.param('followerId'), c.get('userId')]
+  )
+  if (!result.rows[0]) return c.json({ error: 'Follow request not found.' }, 404)
+  return c.json({ ok: true })
+})
+
+users.delete('/followers/:followerId', requireAuth, async (c) => {
+  await query('DELETE FROM follows WHERE follower_id = $1 AND followee_id = $2', [
+    c.req.param('followerId'),
+    c.get('userId'),
+  ])
+  return c.json({ ok: true })
+})
+
 // GET /users/:id — public profile (+ block state, follow state, counts)
 users.get('/:id', requireAuth, async (c) => {
   const result = await query(
     `SELECT ${PUBLIC_USER_COLS},
             EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id = $2 AND b.blocked_id = id) AS blocked_by_me,
-            EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $2 AND f.followee_id = id) AS followed_by_me,
-            (SELECT count(*)::int FROM follows f WHERE f.followee_id = id) AS follower_count,
-            (SELECT count(*)::int FROM follows f WHERE f.follower_id = id) AS following_count
+            EXISTS(
+              SELECT 1 FROM follows f
+              WHERE f.follower_id = $2 AND f.followee_id = id AND f.status = 'accepted'
+            ) AS followed_by_me,
+            (SELECT f.status FROM follows f WHERE f.follower_id = $2 AND f.followee_id = id) AS follow_status,
+            (id = $2 OR NOT is_private OR EXISTS(
+              SELECT 1 FROM follows f
+              WHERE f.follower_id = $2 AND f.followee_id = id AND f.status = 'accepted'
+            )) AS can_view_history,
+            (SELECT count(*)::int FROM follows f WHERE f.followee_id = id AND f.status = 'accepted') AS follower_count,
+            (SELECT count(*)::int FROM follows f WHERE f.follower_id = id AND f.status = 'accepted') AS following_count
      FROM userdata WHERE id = $1`,
     [c.req.param('id'), c.get('userId')]
   )
@@ -429,15 +603,40 @@ users.get('/:id', requireAuth, async (c) => {
 // idempotent both ways.
 users.post('/:id/follow', requireAuth, async (c) => {
   const targetId = c.req.param('id')
-  if (targetId === c.get('userId')) return c.json({ error: "You can't follow yourself." }, 400)
-  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [targetId])
-  if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
-  await query(
-    `INSERT INTO follows (follower_id, followee_id) VALUES ($1, $2)
-     ON CONFLICT DO NOTHING`,
-    [c.get('userId'), targetId]
+  const me = c.get('userId')
+  if (targetId === me) return c.json({ error: "You can't follow yourself." }, 400)
+  const target = await query(
+    `SELECT u.is_private, u.username,
+            EXISTS(
+              SELECT 1 FROM blocks b
+              WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+                 OR (b.blocker_id = u.id AND b.blocked_id = $1)
+            ) AS blocked
+     FROM userdata u WHERE u.id = $2`,
+    [me, targetId]
   )
-  return c.json({ ok: true }, 201)
+  if (!target.rows[0]) return c.json({ error: 'User not found' }, 404)
+  if (target.rows[0].blocked) return c.json({ error: 'You cannot follow this account.' }, 403)
+  const status = target.rows[0].is_private ? 'pending' : 'accepted'
+  const inserted = await query(
+    `INSERT INTO follows (follower_id, followee_id, status, responded_at)
+     VALUES ($1, $2, $3, CASE WHEN $3 = 'accepted' THEN NOW() ELSE NULL END)
+     ON CONFLICT (follower_id, followee_id) DO UPDATE
+       SET status = EXCLUDED.status,
+           created_at = NOW(),
+           responded_at = EXCLUDED.responded_at
+     RETURNING status`,
+    [me, targetId, status]
+  )
+  const actor = await query('SELECT username FROM userdata WHERE id = $1', [me])
+  notify(targetId, 'follows', {
+    title: status === 'pending' ? 'New follow request' : 'New follower',
+    body: `${actor.rows[0]?.username ?? 'Someone'} ${
+      status === 'pending' ? 'requested to follow you.' : 'followed you.'
+    }`,
+    data: { url: status === 'pending' ? '/follow-requests' : `/user/${me}` },
+  })
+  return c.json({ ok: true, follow_status: inserted.rows[0].status }, 201)
 })
 
 users.delete('/:id/follow', requireAuth, async (c) => {

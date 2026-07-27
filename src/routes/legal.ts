@@ -6,7 +6,10 @@ import { Hono } from 'hono'
 const legal = new Hono()
 
 const EFFECTIVE_DATE = 'July 21, 2026'
-const CONTACT_EMAIL = process.env.LEGAL_CONTACT_EMAIL ?? 'michael.tan0953@gmail.com'
+const CONTACT_EMAIL =
+  process.env.LEGAL_CONTACT_EMAIL ??
+  process.env.SUPPORT_EMAIL ??
+  'michael.tan0953@gmail.com'
 
 const page = (title: string, body: string) => `<!doctype html>
 <html lang="en"><head>
@@ -35,13 +38,13 @@ legal.get('/terms', (c) =>
 <p>Welcome to <strong>forum</strong>, a political discussion app. By creating an account or using the app you agree to these terms.</p>
 
 <h2>1. Your account</h2>
-<p>You must provide accurate information and are responsible for activity on your account. You must be at least 17 years old to use forum. You can delete your account at any time from Settings; deletion permanently removes your profile, posts, comments, votes, and messages.</p>
+<p>You must provide accurate information and are responsible for activity on your account. You must be at least 17 years old to use forum. You can delete your account at any time from Settings; your account and app data are removed immediately and associated media is removed from active storage within 24 hours.</p>
 
 <h2>2. Your content</h2>
 <p>You own what you post. By posting you grant us a non-exclusive license to display your content inside the app (that's how a forum works). You are responsible for what you post.</p>
 
 <h2>3. Rules</h2>
-<p>Do not post: spam; harassment, threats, or bullying; hate speech; deliberate misinformation presented as fact; sexual content involving minors; illegal content; or other people's personal information. We may hide content, and suspend or ban accounts, that break these rules. Every piece of content has a Report action; reports are reviewed by moderators.</p>
+<p>Do not post: spam; harassment, threats, or bullying; hate speech; deliberate misinformation presented as fact; sexual content involving minors; illegal content; or other people's personal information. User submissions are checked before publication by narrow deterministic safety rules and OpenAI's moderation service. We may hide content, and suspend or ban accounts, that break these rules. Every piece of content has a Report action; reports are reviewed by moderators.</p>
 
 <h2>4. Spectrum placements</h2>
 <p>The app computes a political-lean placement for content and accounts from a deterministic, published scoring method (see the "Why this placement?" receipts on any score). Placements are estimates for discussion purposes, not statements of fact about you.</p>
@@ -68,31 +71,33 @@ legal.get('/privacy', (c) =>
 
 <h2>What we collect</h2>
 <ul>
-  <li><strong>Account:</strong> email address, username, password (stored as a scrypt hash — we can never read it), optional bio and profile images.</li>
+  <li><strong>Account:</strong> email address, username, password (stored as a scrypt hash — we can never read it), optional bio and profile images, account privacy setting, and follow requests.</li>
   <li><strong>Content and activity:</strong> your posts, comments, votes, bookmarks, debate stances, follows, and direct messages.</li>
   <li><strong>Computed data:</strong> a political-lean placement derived from your posts and votes by a deterministic algorithm. It exists only inside the app and is shown on your profile.</li>
-  <li><strong>Device data:</strong> a push-notification token if you enable notifications. We do not collect location, contacts, or advertising identifiers. Uploaded photos have their metadata (including GPS EXIF) stripped on upload.</li>
+  <li><strong>Device and diagnostics:</strong> a push-notification token if you enable notifications. Crash diagnostics may include app version, build, device model, operating-system version, and the screen where a problem occurred. We do not collect contacts or advertising identifiers. Uploaded photos have their metadata (including GPS EXIF) stripped on upload.</li>
+  <li><strong>Beta feedback:</strong> feedback text, an optional screenshot, and the route, theme, app version/build, platform, OS, and device metadata attached to the report.</li>
 </ul>
 
 <h2>How it's used</h2>
 <ul>
   <li>To operate the product: showing your content, computing placements, delivering notifications you opted into, and sending account emails (verification, password reset).</li>
-  <li><strong>forumAI:</strong> your question (and the article/post you attach) is sent to OpenAI to generate the answer. It is not used to build a profile of you.</li>
-  <li><strong>Moderation:</strong> reported content is reviewed by moderators.</li>
+  <li><strong>forumAI:</strong> your question, recent conversation context, and relevant article/post context are sent to OpenAI to generate the answer. They are not used by forum to build an advertising profile.</li>
+  <li><strong>Moderation:</strong> posts, comments, direct messages, usernames, bios, forumAI prompts, and uploaded images are sent to OpenAI's moderation service after narrow on-server rules. We store the decision metadata and a one-way input hash for audit, not rejected raw content.</li>
+  <li><strong>Beta quality:</strong> structured feedback and crash diagnostics help us reproduce and fix problems.</li>
 </ul>
 
 <h2>What we don't do</h2>
 <ul>
   <li>No selling or renting personal data.</li>
   <li>No third-party advertising or tracking SDKs.</li>
-  <li>No reading of direct messages, except content included in an abuse report.</li>
+  <li>No routine human reading of direct messages. Automated safety checks process messages before delivery; moderators may review content included in an abuse report when that reporting flow is available.</li>
 </ul>
 
 <h2>Service providers</h2>
-<p>Infrastructure providers process data on our behalf: database hosting (Neon), image storage (Cloudflare R2), email delivery (Resend), push delivery (Expo), and AI responses (OpenAI). Each receives only what its function requires.</p>
+<p>Infrastructure providers process data on our behalf: application hosting (Railway), database hosting (Neon), public and private image storage (Cloudflare R2), email delivery (Resend), push and build delivery (Expo), crash diagnostics (Sentry), TestFlight distribution (Apple), and AI responses and safety checks (OpenAI). Each receives only what its function requires.</p>
 
 <h2>Retention and deletion</h2>
-<p>Data is kept while your account exists. Settings → Delete Account permanently removes your profile, posts, comments, votes, messages, and push tokens. Backups age out on a rolling basis.</p>
+<p>Data is kept while your account exists. Settings → Delete Account immediately removes your profile, posts, comments, votes, messages, and push tokens. Associated public media and private feedback screenshots are queued for deletion from active storage, retried on failure, and removed within 24 hours. Backups age out on a rolling basis.</p>
 
 <h2>Your rights</h2>
 <p>You can access and edit your profile in-app, export your content by request, and delete everything yourself. Contact us for anything else.</p>

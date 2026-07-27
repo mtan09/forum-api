@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { notify } from '../lib/push'
+import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -113,6 +114,9 @@ messages.post(
     const content = String(body?.content ?? '').trim()
     if (!content) return c.json({ error: 'Message is empty.' }, 400)
     if (content.length > 2000) return c.json({ error: 'Message is too long (2000 max).' }, 400)
+    const moderation = await moderateText(me, 'dm', content)
+    const moderationError = moderationFailure(moderation)
+    if (moderationError) return c.json(moderationError.body, moderationError.status)
 
     const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [other])
     if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
