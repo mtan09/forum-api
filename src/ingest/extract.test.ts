@@ -1,19 +1,35 @@
 import { describe, expect, it } from 'vitest'
-import { extractArticleText, normalizeArticleImageUrl, selectArticleImageUrl } from './extract'
-import { rightsForSource } from './source-rights'
+import { normalizeArticleImageUrl, selectArticleImageUrl } from './extract'
 
 const ARTICLE = 'https://thehill.com/policy/defense/5982033-hegseth-caine-iran-funding/'
 const FEED_IMAGE =
   'https://thehill.com/wp-content/uploads/sites/2/2026/07/hegseth_pete_071726gn02_w.jpg?w=900'
 
 describe('article image selection', () => {
-  it('validates the canonical feed enclosure', () => {
-    expect(selectArticleImageUrl(ARTICLE, FEED_IMAGE)).toBe(FEED_IMAGE)
+  it('prefers the canonical feed enclosure over page metadata', () => {
+    expect(selectArticleImageUrl(ARTICLE, FEED_IMAGE, 'https://cdn.example.com/other.jpg')).toBe(
+      FEED_IMAGE
+    )
   })
 
   it('rejects an article URL with an encoded photo caption appended', () => {
     const malformed = `${ARTICLE}Defense%20Secretary%20Pete%20Hegseth%20testifies`
     expect(normalizeArticleImageUrl(malformed, ARTICLE)).toBeNull()
+  })
+
+  it('falls back to a valid page image when a feed has no image', () => {
+    const pageImage = '/wp-content/uploads/photo.webp?width=1200'
+    expect(selectArticleImageUrl(ARTICLE, null, pageImage)).toBe(
+      'https://thehill.com/wp-content/uploads/photo.webp?width=1200'
+    )
+  })
+
+  it('falls back when any outlet supplies malformed feed metadata', () => {
+    const article = 'https://news.example.com/politics/a-story/'
+    const malformedFeedImage = `${article}Photo%20caption%20instead%20of%20an%20image`
+    const pageImage = 'https://images.cdn.example/assets/abc123'
+
+    expect(selectArticleImageUrl(article, malformedFeedImage, pageImage)).toBe(pageImage)
   })
 
   it('keeps same-origin and extensionless CDN images used by other outlets', () => {
@@ -31,22 +47,11 @@ describe('article image selection', () => {
     expect(normalizeArticleImageUrl('data:image/png;base64,abc', ARTICLE)).toBeNull()
   })
 
-  it('restores transient feed analysis and image discovery without public body text', async () => {
-    const feedBody = 'Congress debated the proposal and its effects. '.repeat(20)
-    const extracted = await extractArticleText({
-      title: 'A political headline',
-      url: ARTICLE,
-      summary: 'A publisher-written summary that is not licensed for reuse.',
-      contentHtml: `<p>${feedBody}</p>`,
-      publishedAt: new Date('2026-07-29T12:00:00Z'),
-      categories: ['Politics'],
-      imageUrl: FEED_IMAGE,
-    }, rightsForSource('the-hill'))
-
-    expect(extracted.analysisText).toContain('Congress debated')
-    expect(extracted.analysisMethod).toBe('feed')
-    expect(extracted.publicDescription).toBeNull()
-    expect(extracted.imageUrl).toBe(FEED_IMAGE)
-    expect(extracted.usedFullPage).toBe(false)
+  it('rejects explicit video and HLS assets while keeping extensionless images', () => {
+    expect(normalizeArticleImageUrl('https://cdn.example.com/live/master.m3u8', ARTICLE)).toBeNull()
+    expect(normalizeArticleImageUrl('https://cdn.example.com/video/story.mp4?autoplay=1', ARTICLE)).toBeNull()
+    expect(normalizeArticleImageUrl('https://cdn.example.com/image/opaque-id', ARTICLE)).toBe(
+      'https://cdn.example.com/image/opaque-id'
+    )
   })
 })

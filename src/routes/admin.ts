@@ -1,8 +1,6 @@
 import { Hono } from 'hono'
 import { query } from '../db'
-import { RIGHTS_POLICY_VERSION, rightsForSource } from '../ingest/source-rights'
-import { SOURCES } from '../ingest/sources'
-import { deletePrefix, publicStorageConfigured, signedFeedbackUrl } from '../lib/r2'
+import { signedFeedbackUrl } from '../lib/r2'
 import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
 
@@ -192,8 +190,7 @@ admin.post('/moderation/:id/resolve', async (c) => {
 admin.get('/ingest-status', async (c) => {
   const result = await query(
     `SELECT id, status, feeds_ok, feeds_failed, sources_failed, seen, inserted,
-            skipped_duplicate, skipped_irrelevant, evidence_generated,
-            evidence_fallback, images_cached, images_fallback, error, started_at,
+            skipped_duplicate, skipped_irrelevant, error, started_at,
             completed_at, duration_ms
      FROM ingest_runs
      ORDER BY started_at DESC
@@ -208,56 +205,6 @@ admin.get('/ingest-status', async (c) => {
     runs: result.rows,
     last_success_at: latestSuccess.rows[0]?.completed_at ?? null,
   })
-})
-
-// Reviewed publisher policy state used by ingestion. This makes the
-// deny-by-default decisions inspectable without exposing them publicly.
-admin.get('/source-rights', async (c) => {
-  return c.json({
-    policy_version: RIGHTS_POLICY_VERSION,
-    sources: SOURCES.map((source) => ({
-      name: source.name,
-      slug: source.slug,
-      lean: source.lean,
-      ...rightsForSource(source.slug),
-    })),
-  })
-})
-
-// Immediate image takedown. Removes managed variants from R2 and clears both
-// cached and remote display URLs so clients cannot keep rendering the image.
-admin.post('/articles/:id/purge-media', async (c) => {
-  const articleId = c.req.param('id')
-  if (!/^[0-9a-f-]{36}$/i.test(articleId)) {
-    return c.json({ error: 'Invalid article ID' }, 400)
-  }
-  const article = await query(
-    `SELECT id, image_mode FROM articles WHERE id = $1`,
-    [articleId]
-  )
-  if (!article.rows[0]) return c.json({ error: 'Article not found' }, 404)
-  let deletedObjects = 0
-  if (
-    article.rows[0].image_mode === 'managed_thumbnail' &&
-    publicStorageConfigured() &&
-    process.env.R2_BUCKET_NAME
-  ) {
-    deletedObjects = await deletePrefix(
-      process.env.R2_BUCKET_NAME,
-      `articles/${articleId}/`
-    )
-  }
-  await query(
-    `UPDATE articles
-     SET media = NULL, media_source_url = NULL, media_thumbnail_url = NULL,
-         media_large_url = NULL, media_width = NULL, media_height = NULL,
-         media_source_hash = NULL, media_status = 'none',
-         media_cached_at = NULL, media_expires_at = NULL,
-         media_error = 'purged by admin', image_mode = 'none'
-     WHERE id = $1`,
-    [articleId]
-  )
-  return c.json({ ok: true, deleted_objects: deletedObjects })
 })
 
 export default admin

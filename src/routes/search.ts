@@ -1,8 +1,5 @@
 import { Hono } from 'hono'
 import { query } from '../db'
-import { RIGHTS_POLICY_VERSION } from '../ingest/source-rights'
-import { publicArticleFields } from '../lib/article-public'
-import { searchPhrases, searchTerms } from '../lib/search-query'
 import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
 
@@ -11,6 +8,18 @@ const search = new Hono<AppEnv>()
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SEARCH_LIMIT = 20
 const TOPIC_LIMIT = 8
+const STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has',
+  'in', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'was',
+  'were', 'will', 'with',
+])
+
+function searchTerms(value: string): string[] {
+  return Array.from(new Set(
+    (value.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+      .filter((term) => term.length >= 2 && !STOP_WORDS.has(term))
+  )).slice(0, 8)
+}
 
 function emptyResponse() {
   return {
@@ -40,16 +49,13 @@ search.get('/', requireAuth, async (c) => {
 
   const userId = c.get('userId')
   const terms = searchTerms(q)
-  const phrases = searchPhrases(terms)
   const broadQuery = terms.length > 0 ? terms.join(' | ') : q.replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
   const minimumTermMatches = terms.length <= 2 ? 1 : 2
   const tags = terms.map((term) => term.replace(/[^a-z0-9_]/g, '')).filter(Boolean)
 
   const topicResult = topicId
     ? await query(
-        `SELECT s.id, s.title,
-                CASE WHEN s.summary_policy_version = $2 THEN s.short_summary ELSE NULL END AS short_summary,
-                s.keywords, s.volume,
+        `SELECT s.id, s.title, s.short_summary, s.keywords, s.volume,
                 s.public_position, s.score,
                 count(a.id)::int AS article_count,
                 count(DISTINCT a.source)::int AS outlet_count
@@ -57,37 +63,27 @@ search.get('/', requireAuth, async (c) => {
          LEFT JOIN articles a ON a.subtopic_id = s.id AND a.status = 'ready'
          WHERE s.id = $1
          GROUP BY s.id`,
-        [topicId, RIGHTS_POLICY_VERSION]
+        [topicId]
       )
     : await query(
-        `SELECT s.id, s.title,
-                CASE WHEN s.summary_policy_version = $3 THEN s.short_summary ELSE NULL END AS short_summary,
-                s.keywords, s.volume,
+        `SELECT s.id, s.title, s.short_summary, s.keywords, s.volume,
                 s.public_position, s.score,
                 count(a.id)::int AS article_count,
                 count(DISTINCT a.source)::int AS outlet_count,
                 ts_rank(
-                  to_tsvector('english', concat_ws(' ', s.title, array_to_string(s.keywords, ' '))),
+                  to_tsvector('english', concat_ws(' ', s.title, s.short_summary, array_to_string(s.keywords, ' '))),
                   websearch_to_tsquery('english', $1)
                 ) AS exact_rank
          FROM subtopics s
          LEFT JOIN articles a ON a.subtopic_id = s.id AND a.status = 'ready'
          WHERE s.cluster_key IS NOT NULL
-           AND (
-             to_tsvector('english', concat_ws(' ', s.title, array_to_string(s.keywords, ' ')))
-               @@ websearch_to_tsquery('english', $1)
-             OR EXISTS (
-               SELECT 1
-               FROM unnest($4::text[]) AS phrase
-               WHERE phrase = ANY(s.keywords)
-                  OR position(phrase IN lower(coalesce(s.title, ''))) > 0
-             )
-           )
+           AND to_tsvector('english', concat_ws(' ', s.title, s.short_summary, array_to_string(s.keywords, ' ')))
+             @@ websearch_to_tsquery('english', $1)
          GROUP BY s.id
          HAVING count(a.id) > 0
          ORDER BY exact_rank DESC, s.score DESC, s.updated_at DESC
          LIMIT $2`,
-        [q, TOPIC_LIMIT, RIGHTS_POLICY_VERSION, phrases]
+        [q, TOPIC_LIMIT]
       )
 
   const topicIds = topicResult.rows.map((topic) => topic.id)
@@ -127,12 +123,6 @@ search.get('/', requireAuth, async (c) => {
        AND (
          a.search_tsv @@ websearch_to_tsquery('english', $2)
          OR a.subtopic_id = ANY($3::uuid[])
-         OR EXISTS (
-           SELECT 1
-           FROM unnest($4::text[]) AS phrase
-           WHERE phrase = ANY(a.event_terms)
-              OR position(phrase IN lower(coalesce(a.title, ''))) > 0
-         )
        )`
   const articleCountMatch = topicId
     ? `a.status = 'ready' AND a.subtopic_id = $1`
@@ -140,17 +130,11 @@ search.get('/', requireAuth, async (c) => {
        AND (
          a.search_tsv @@ websearch_to_tsquery('english', $1)
          OR a.subtopic_id = ANY($2::uuid[])
-         OR EXISTS (
-           SELECT 1
-           FROM unnest($3::text[]) AS phrase
-           WHERE phrase = ANY(a.event_terms)
-              OR position(phrase IN lower(coalesce(a.title, ''))) > 0
-         )
        )`
   const postParams = [userId, q, broadQuery, tags, minimumTermMatches]
   const postCountParams = [userId, q, tags, minimumTermMatches]
-  const articleParams = [userId, q, topicId || topicIds, phrases]
-  const articleCountParams = topicId ? [topicId] : [q, topicIds, phrases]
+  const articleParams = [userId, q, topicId || topicIds]
+  const articleCountParams = topicId ? [topicId] : [q, topicIds]
 
   const [posts, postCount, articles, articleCount] = await Promise.all([
     query(
@@ -181,7 +165,10 @@ search.get('/', requireAuth, async (c) => {
       postCountParams
     ),
     query(
-      `SELECT ${publicArticleFields('a')},
+      `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
+              a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
+              a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
+              a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
               v.direction AS my_vote,
               EXISTS(
                 SELECT 1 FROM bookmarks b
@@ -192,12 +179,6 @@ search.get('/', requireAuth, async (c) => {
        WHERE ${articleMatch}
        ORDER BY
          (a.search_tsv @@ websearch_to_tsquery('english', $2)) DESC,
-         (EXISTS (
-           SELECT 1
-           FROM unnest($4::text[]) AS phrase
-           WHERE phrase = ANY(a.event_terms)
-              OR position(phrase IN lower(coalesce(a.title, ''))) > 0
-         )) DESC,
          ts_rank(a.search_tsv, websearch_to_tsquery('english', $2)) DESC,
          a.published_at DESC NULLS LAST
        LIMIT ${SEARCH_LIMIT}`,

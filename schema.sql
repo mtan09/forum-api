@@ -45,11 +45,7 @@ CREATE TABLE IF NOT EXISTS subtopics (
   keywords          TEXT[] DEFAULT '{}',
   volume            INTEGER DEFAULT 0,
   public_position   FLOAT CHECK (public_position BETWEEN 0 AND 1),
-  image_urls        TEXT[] DEFAULT '{}',
-  cluster_key       TEXT UNIQUE,
-  score             FLOAT DEFAULT 0,
-  summary_policy_version TEXT,
-  updated_at        TIMESTAMPTZ DEFAULT NOW()
+  image_urls        TEXT[] DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -64,7 +60,6 @@ CREATE TABLE IF NOT EXISTS posts (
   position_confidence FLOAT CHECK (position_confidence BETWEEN 0 AND 1),
   position_signals    TEXT[] DEFAULT '{}',
   scorer_version      TEXT,
-  hashtags            TEXT[] NOT NULL DEFAULT '{}',
   upvotes             INTEGER DEFAULT 0,
   downvotes           INTEGER DEFAULT 0,
   commentcount        INTEGER DEFAULT 0,
@@ -81,30 +76,7 @@ CREATE TABLE IF NOT EXISTS articles (
   title               TEXT,
   source              TEXT,
   content             TEXT,
-  description         TEXT,
   media               TEXT,
-  entities            TEXT[] NOT NULL DEFAULT '{}',
-  event_terms         TEXT[] NOT NULL DEFAULT '{}',
-  hashtags            TEXT[] NOT NULL DEFAULT '{}',
-  search_text         TEXT NOT NULL DEFAULT '',
-  text_mode           TEXT NOT NULL DEFAULT 'headline_only'
-                        CHECK (text_mode IN ('headline_only', 'feed_description', 'full_text')),
-  image_mode          TEXT NOT NULL DEFAULT 'none'
-                        CHECK (image_mode IN ('none', 'remote_no_cache', 'managed_thumbnail', 'licensed_cache')),
-  ai_mode             TEXT NOT NULL DEFAULT 'metadata_only'
-                        CHECK (ai_mode IN ('metadata_only', 'structured_evidence', 'permitted_text', 'denied')),
-  rights_policy_version TEXT,
-  media_source_url    TEXT,
-  media_thumbnail_url TEXT,
-  media_large_url     TEXT,
-  media_width         INTEGER,
-  media_height        INTEGER,
-  media_status        TEXT NOT NULL DEFAULT 'none'
-                        CHECK (media_status IN ('none', 'pending', 'ready', 'failed')),
-  media_source_hash   TEXT,
-  media_cached_at     TIMESTAMPTZ,
-  media_expires_at    TIMESTAMPTZ,
-  media_error         TEXT,
   political_lean      FLOAT CHECK (political_lean BETWEEN 0 AND 1),
   political_relevance FLOAT CHECK (political_relevance BETWEEN 0 AND 1),
   lean_confidence     FLOAT CHECK (lean_confidence BETWEEN 0 AND 1),
@@ -120,42 +92,8 @@ CREATE TABLE IF NOT EXISTS articles (
   published_at        TIMESTAMPTZ,
   status              TEXT DEFAULT 'ready' CHECK (status IN ('pending', 'ready')),
   search_tsv          TSVECTOR GENERATED ALWAYS AS
-                        (to_tsvector('english', coalesce(search_text, ''))) STORED,
+                        (to_tsvector('english', coalesce(title, '') || ' ' || left(coalesce(content, ''), 20000))) STORED,
   created_at          TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS article_evidence (
-  article_id           UUID PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
-  extraction_version   TEXT NOT NULL,
-  source_text_hash     TEXT,
-  word_count           INTEGER NOT NULL DEFAULT 0,
-  evidence_summary     TEXT NOT NULL DEFAULT '',
-  claims               JSONB NOT NULL DEFAULT '[]'::jsonb,
-  timeline             JSONB NOT NULL DEFAULT '[]'::jsonb,
-  relationships        JSONB NOT NULL DEFAULT '[]'::jsonb,
-  disputed_points      JSONB NOT NULL DEFAULT '[]'::jsonb,
-  entities             TEXT[] NOT NULL DEFAULT '{}',
-  event_terms          TEXT[] NOT NULL DEFAULT '{}',
-  search_text          TEXT NOT NULL DEFAULT '',
-  extraction_method    TEXT NOT NULL
-                         CHECK (extraction_method IN ('metadata', 'feed', 'full_page')),
-  confidence            FLOAT NOT NULL DEFAULT 0 CHECK (confidence BETWEEN 0 AND 1),
-  generated_by          TEXT NOT NULL DEFAULT 'deterministic'
-                         CHECK (generated_by IN ('deterministic', 'openai')),
-  extracted_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_article_evidence_search
-  ON article_evidence USING GIN (to_tsvector('english', search_text));
-CREATE INDEX IF NOT EXISTS idx_article_evidence_entities
-  ON article_evidence USING GIN (entities);
-CREATE INDEX IF NOT EXISTS idx_article_evidence_event_terms
-  ON article_evidence USING GIN (event_terms);
-
-CREATE TABLE IF NOT EXISTS article_analysis_usage (
-  day         DATE PRIMARY KEY,
-  requests    INTEGER NOT NULL DEFAULT 0,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Daily debates auto-picked from published story clusters: the biggest
@@ -415,10 +353,6 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
   inserted INTEGER NOT NULL DEFAULT 0,
   skipped_duplicate INTEGER NOT NULL DEFAULT 0,
   skipped_irrelevant INTEGER NOT NULL DEFAULT 0,
-  evidence_generated INTEGER NOT NULL DEFAULT 0,
-  evidence_fallback INTEGER NOT NULL DEFAULT 0,
-  images_cached INTEGER NOT NULL DEFAULT 0,
-  images_fallback INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ,

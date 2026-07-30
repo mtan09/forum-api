@@ -1,7 +1,5 @@
 import { Hono } from 'hono'
 import { query } from '../db'
-import { RIGHTS_POLICY_VERSION } from '../ingest/source-rights'
-import { publicArticleFields } from '../lib/article-public'
 import type { AppEnv } from '../types'
 
 const topics = new Hono<AppEnv>()
@@ -12,15 +10,16 @@ topics.get('/', async (c) => {
   const [topicsResult, subtopicsResult] = await Promise.all([
     query('SELECT * FROM general_topics ORDER BY importance DESC'),
     query(
-      `SELECT id, general_topic_id, title,
-              CASE WHEN summary_policy_version = $1 THEN short_summary ELSE NULL END AS short_summary,
-              CASE WHEN summary_policy_version = $1 THEN long_summary ELSE NULL END AS long_summary,
-              keywords, volume, public_position,
-              CASE WHEN summary_policy_version = $1 THEN image_urls ELSE '{}'::text[] END AS image_urls,
-              cluster_key, score, updated_at
-       FROM subtopics
-       ORDER BY general_topic_id, title`,
-      [RIGHTS_POLICY_VERSION]
+      `SELECT * FROM subtopics s
+       WHERE s.cluster_key IS NULL
+          OR (
+            s.score > 0
+            AND EXISTS (
+              SELECT 1 FROM articles a
+              WHERE a.subtopic_id = s.id AND a.status = 'ready'
+            )
+          )
+       ORDER BY general_topic_id, title`
     ),
   ])
 
@@ -39,9 +38,7 @@ topics.get('/', async (c) => {
 topics.get('/hot', async (c) => {
   const limit = Math.min(Number(c.req.query('limit')) || 8, 20)
   const result = await query(
-    `SELECT s.id, s.title,
-            CASE WHEN s.summary_policy_version = $2 THEN s.short_summary ELSE NULL END AS short_summary,
-            s.keywords, s.volume,
+    `SELECT s.id, s.title, s.short_summary, s.keywords, s.volume,
             s.public_position, s.score,
             (SELECT count(*)::int
              FROM articles a
@@ -51,35 +48,74 @@ topics.get('/hot', async (c) => {
        AND s.updated_at > NOW() - INTERVAL '7 days'
      ORDER BY s.score DESC, s.updated_at DESC
      LIMIT $1`,
-    [limit, RIGHTS_POLICY_VERSION]
+    [limit]
   )
   return c.json(result.rows)
 })
 
 // GET /topics/subtopics/:id — subtopic detail plus its articles
 topics.get('/subtopics/:id', async (c) => {
-  const id = c.req.param('id')
-  const [subtopicResult, articlesResult] = await Promise.all([
-    query(
-      `SELECT id, general_topic_id, title,
-              CASE WHEN summary_policy_version = $2 THEN short_summary ELSE NULL END AS short_summary,
-              CASE WHEN summary_policy_version = $2 THEN long_summary ELSE NULL END AS long_summary,
-              keywords, volume, public_position,
-              CASE WHEN summary_policy_version = $2 THEN image_urls ELSE '{}'::text[] END AS image_urls,
-              cluster_key, score, updated_at
-       FROM subtopics WHERE id = $1`,
-      [id, RIGHTS_POLICY_VERSION]
-    ),
-    query(
-      `SELECT ${publicArticleFields('a')}
-       FROM articles a
-       WHERE a.subtopic_id = $1 AND a.status = 'ready'
-       ORDER BY a.published_at DESC NULLS LAST`,
-      [id]
-    ),
-  ])
+  const requestedId = c.req.param('id')
+  const subtopicResult = await query('SELECT * FROM subtopics WHERE id = $1', [requestedId])
   if (!subtopicResult.rows[0]) return c.json({ error: 'Subtopic not found' }, 404)
-  return c.json({ ...subtopicResult.rows[0], articles: articlesResult.rows })
+
+  let subtopic = subtopicResult.rows[0]
+  let resolvedFromId: string | null = null
+  const loadArticles = (id: string) =>
+    query(
+      `SELECT id, url, title, source, media, political_lean,
+         political_relevance, lean_confidence, content_type, lean_signals,
+         source_lean, scorer_version, upvotes, downvotes, commentcount,
+         general_topic_id, subtopic_id, published_at, status, created_at FROM articles WHERE subtopic_id = $1 AND status = 'ready'
+       ORDER BY published_at DESC NULLS LAST`,
+      [id]
+    )
+
+  let articlesResult = await loadArticles(requestedId)
+  if (articlesResult.rows.length === 0 && subtopic.cluster_key) {
+    const keywords = Array.isArray(subtopic.keywords) ? subtopic.keywords : []
+    const replacement = await query(
+      `SELECT s.*,
+              (SELECT count(*)::int
+               FROM unnest(COALESCE(s.keywords, '{}'::text[])) keyword
+               WHERE keyword = ANY($2::text[])) AS keyword_overlap
+       FROM subtopics s
+       WHERE s.id <> $1
+         AND s.cluster_key IS NOT NULL
+         AND s.score > 0
+         AND EXISTS (
+           SELECT 1 FROM articles a
+           WHERE a.subtopic_id = s.id AND a.status = 'ready'
+         )
+         AND (
+           lower(s.title) = lower($3)
+           OR (
+             SELECT count(*)
+             FROM unnest(COALESCE(s.keywords, '{}'::text[])) keyword
+             WHERE keyword = ANY($2::text[])
+           ) >= 2
+         )
+       ORDER BY (lower(s.title) = lower($3)) DESC,
+                keyword_overlap DESC,
+                s.score DESC
+       LIMIT 1`,
+      [requestedId, keywords, subtopic.title]
+    )
+    if (replacement.rows[0]) {
+      resolvedFromId = requestedId
+      subtopic = replacement.rows[0]
+      articlesResult = await loadArticles(subtopic.id)
+    }
+  }
+
+  if (articlesResult.rows.length === 0) {
+    return c.json({ error: 'This story is no longer active.' }, 410)
+  }
+  return c.json({
+    ...subtopic,
+    resolved_from_id: resolvedFromId,
+    articles: articlesResult.rows,
+  })
 })
 
 export default topics

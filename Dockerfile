@@ -1,5 +1,5 @@
 # forum-api — deployable to Railway / Fly / Render / any Docker host.
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 

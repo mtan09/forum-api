@@ -98,7 +98,7 @@ Today's date is ${new Date().toISOString().slice(0, 10)}. Your training data may
     subjectBlock ? `\n\n${subjectBlock}` : ''
   }${
     coverageBlock
-      ? `\n\nRecent attributed coverage from the app's news corpus. Entries may include a headline plus compact structured evidence paraphrased during transient ingestion; forum does not store publisher article bodies. Treat a headline as framing, attribute single-outlet claims, distinguish cross-source agreement from disputed points, and never invent missing details. When useful, include the supplied publisher links so the user can read the original reporting:\n${coverageBlock}`
+      ? `\n\nRecent coverage from the app's news feed. Ground your answers in it when relevant, name the outlet when you draw on a specific article, and never invent coverage that is not listed:\n${coverageBlock}`
       : ''
   }`
 

@@ -23,15 +23,7 @@
     "verify:release": "tsx scripts/verify-release-migration.ts",
     "storage:feedback": "tsx scripts/ensure-feedback-bucket.ts",
     "verify:feedback-storage": "tsx scripts/verify-feedback-storage.ts",
-    "migrate:rights": "tsx scripts/apply-rights-migration.ts",
-    "backfill:article-metadata": "tsx scripts/backfill-article-metadata.ts",
-    "verify:rights": "tsx scripts/verify-rights-migration.ts",
-    "audit:article-cleanup": "tsx scripts/cleanup-article-content.ts",
-    "cleanup:articles": "APPLY_ARTICLE_RIGHTS_CLEANUP=true tsx scripts/cleanup-article-content.ts",
-    "migrate:article-analysis": "tsx scripts/apply-article-analysis-migration.ts",
-    "backfill:article-evidence": "tsx scripts/backfill-article-evidence.ts",
-    "verify:article-analysis": "tsx scripts/verify-article-analysis.ts",
-    "expire:article-images": "tsx scripts/expire-article-images.ts",
+    "backfill:article-content": "tsx scripts/backfill-reverted-article-content.ts",
     "test": "vitest run"
   },
   "dependencies": {

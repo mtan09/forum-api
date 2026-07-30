@@ -1,11 +1,11 @@
-// Structured-evidence grounding for forumAI. Publisher bodies are not stored
-// or retrieved. Each item contributes attributed metadata plus compact,
-// original evidence created during transient ingestion.
+// Grounding context for forumAI — deterministic retrieval over the app's
+// own ingested articles. No embeddings, no external search: the same
+// keyword machinery that drives hashtags and clustering ranks recent
+// articles against the question. Every output here is clamped hard so the
+// prompt can never balloon no matter how big the corpus gets.
 
 import { query } from '../db'
-import { metadataKeywordProfile } from '../ingest/article-metadata'
 import { extractKeywords, keywordSimilarity, type Keywords } from '../ingest/keywords'
-import { RIGHTS_POLICY_VERSION } from '../ingest/source-rights'
 
 const RECENT_DAYS = 14
 const CANDIDATE_LIMIT = 400
@@ -13,9 +13,9 @@ const MAX_COVERAGE_ITEMS = 5
 const MAX_PER_OUTLET = 2
 const MIN_SHARED_TERMS = 2
 const TITLE_CLAMP = 140
-const DESCRIPTION_CLAMP = 220
-const USER_SUBJECT_CLAMP = 900
-const COVERAGE_CLAMP = 3800
+const LEAD_CLAMP = 220
+const SUBJECT_CLAMP = 900
+const COVERAGE_CLAMP = 2600
 
 export type CoverageIntent = 'top_story' | 'latest' | 'relevance'
 
@@ -108,17 +108,7 @@ type ArticleRow = {
   source: string | null
   source_lean: number | null
   published_at: string | null
-  url: string | null
-  description: string | null
-  entities: string[]
-  event_terms: string[]
-  ai_mode: 'metadata_only' | 'structured_evidence' | 'permitted_text' | 'denied'
-  evidence_summary: string | null
-  evidence_search_text: string | null
-  claims: Array<{ subject?: string; claim?: string; attribution?: string; confidence?: number }>
-  timeline: Array<{ date?: string | null; event?: string; confidence?: number }>
-  disputed_points: string[]
-  evidence_confidence: number | null
+  content: string | null
   subtopic_id?: string | null
 }
 
@@ -131,32 +121,7 @@ type StoryRow = {
 }
 
 function articleLine(a: ArticleRow): string {
-  const permittedDescription =
-    a.ai_mode === 'permitted_text' && a.description
-      ? ` Permitted description: ${clamp(a.description, DESCRIPTION_CLAMP)}`
-      : ''
-  const evidence = a.ai_mode === 'structured_evidence' && a.evidence_summary
-    ? ` Evidence summary: ${clamp(a.evidence_summary, 360)}`
-    : ''
-  const claims = a.ai_mode === 'structured_evidence'
-    ? (a.claims ?? []).slice(0, 3).flatMap((claim) => {
-        const text = clamp(claim.claim ?? '', 220)
-        return text ? [`Attributed claim: ${text}`] : []
-      }).join(' ')
-    : ''
-  const timeline = a.ai_mode === 'structured_evidence'
-    ? (a.timeline ?? []).slice(0, 2).flatMap((fact) => {
-        const event = clamp(fact.event ?? '', 180)
-        return event ? [`Timeline${fact.date ? ` ${fact.date}` : ''}: ${event}`] : []
-      }).join(' ')
-    : ''
-  return [
-    `- Headline: "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}. Publisher link: ${a.url ?? 'unavailable'}.`,
-    permittedDescription,
-    evidence,
-    claims ? ` ${claims}` : '',
-    timeline ? ` ${timeline}` : '',
-  ].join('')
+  return `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}: ${clamp(a.content ?? '', LEAD_CLAMP)}`
 }
 
 function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] {
@@ -192,18 +157,12 @@ function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] 
 
 async function latestCoverage(excludeId?: string | null): Promise<string> {
   const result = await query(
-    `SELECT a.id, a.url, a.title, a.source, a.source_lean, a.published_at,
-            a.description, a.entities, a.event_terms, a.ai_mode, a.subtopic_id,
-            e.evidence_summary, e.search_text AS evidence_search_text,
-            e.claims, e.timeline, e.disputed_points,
-            e.confidence AS evidence_confidence
-     FROM articles a
-     LEFT JOIN article_evidence e ON e.article_id = a.id
-     WHERE a.status = 'ready' AND a.title IS NOT NULL
-       AND a.ai_mode <> 'denied'
-       AND a.id <> COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-       AND COALESCE(a.published_at, a.created_at) > NOW() - INTERVAL '3 days'
-     ORDER BY a.published_at DESC NULLS LAST
+    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+     FROM articles
+     WHERE status = 'ready' AND title IS NOT NULL
+       AND id <> COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+       AND COALESCE(published_at, created_at) > NOW() - INTERVAL '3 days'
+     ORDER BY published_at DESC NULLS LAST
      LIMIT 60`,
     [excludeId ?? null]
   )
@@ -214,31 +173,23 @@ async function latestCoverage(excludeId?: string | null): Promise<string> {
 
 async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): Promise<string> {
   const storiesResult = await query(
-    `SELECT id, title,
-            CASE WHEN summary_policy_version = $2 THEN short_summary ELSE NULL END AS short_summary,
-            volume, score
+    `SELECT id, title, short_summary, volume, score
      FROM subtopics
      WHERE cluster_key IS NOT NULL AND score > 0
        AND updated_at > NOW() - INTERVAL '7 days'
      ORDER BY score DESC, updated_at DESC
      LIMIT $1`,
-    [topicLimit, RIGHTS_POLICY_VERSION]
+    [topicLimit]
   )
   const stories = storiesResult.rows as StoryRow[]
   if (stories.length === 0) return latestCoverage(excludeId)
 
   const articleResult = await query(
-    `SELECT a.id, a.url, a.title, a.source, a.source_lean, a.published_at,
-            a.description, a.entities, a.event_terms, a.ai_mode, a.subtopic_id,
-            e.evidence_summary, e.search_text AS evidence_search_text,
-            e.claims, e.timeline, e.disputed_points,
-            e.confidence AS evidence_confidence
-     FROM articles a
-     LEFT JOIN article_evidence e ON e.article_id = a.id
-     WHERE a.status = 'ready' AND a.subtopic_id = ANY($1::uuid[])
-       AND a.ai_mode <> 'denied'
-       AND a.id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
-     ORDER BY a.published_at DESC NULLS LAST`,
+    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+     FROM articles
+     WHERE status = 'ready' AND subtopic_id = ANY($1::uuid[])
+       AND id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+     ORDER BY published_at DESC NULLS LAST`,
     [stories.map((story) => story.id), excludeId ?? null]
   )
   const articles = articleResult.rows as ArticleRow[]
@@ -247,7 +198,7 @@ async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): 
   let budget = COVERAGE_CLAMP
 
   for (const story of stories) {
-    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, DESCRIPTION_CLAMP)}` : ''}`
+    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, LEAD_CLAMP)}` : ''}`
     if (storyLine.length + 1 > budget) break
     lines.push(storyLine)
     budget -= storyLine.length + 1
@@ -276,17 +227,11 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   if (qk.terms.size === 0) return ''
 
   const result = await query(
-    `SELECT a.id, a.url, a.title, a.source, a.source_lean, a.published_at,
-            a.description, a.entities, a.event_terms, a.ai_mode,
-            e.evidence_summary, e.search_text AS evidence_search_text,
-            e.claims, e.timeline, e.disputed_points,
-            e.confidence AS evidence_confidence
-     FROM articles a
-     LEFT JOIN article_evidence e ON e.article_id = a.id
-     WHERE a.status = 'ready' AND a.title IS NOT NULL
-       AND a.ai_mode <> 'denied'
-       AND COALESCE(a.published_at, a.created_at) > NOW() - INTERVAL '${RECENT_DAYS} days'
-     ORDER BY a.published_at DESC NULLS LAST
+    `SELECT id, title, source, source_lean, published_at, content
+     FROM articles
+     WHERE status = 'ready' AND title IS NOT NULL
+       AND COALESCE(published_at, created_at) > NOW() - INTERVAL '${RECENT_DAYS} days'
+     ORDER BY published_at DESC NULLS LAST
      LIMIT ${CANDIDATE_LIMIT}`
   )
 
@@ -300,16 +245,7 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   const scored = (result.rows as ArticleRow[])
     .filter((a) => a.id !== excludeId)
     .map((a) => {
-      const permittedDescription =
-        a.ai_mode === 'permitted_text' ? a.description ?? '' : ''
-      const profile = metadataKeywordProfile(
-        a.title ?? '',
-        a.entities ?? [],
-        a.event_terms ?? [],
-        [permittedDescription, a.evidence_search_text ?? '', a.evidence_summary ?? '']
-          .filter(Boolean)
-          .join(' ')
-      )
+      const profile = extractKeywords(a.title ?? '', a.content ?? '', 400)
       const { roots, bigram } = sharedConcepts(qk, profile)
       return { a, roots, bigram, sim: keywordSimilarity(qk, profile) }
     })
@@ -359,37 +295,18 @@ export type Subject = { block: string; seed: string }
 
 export async function articleSubject(articleId: string): Promise<Subject | null> {
   const result = await query(
-    `SELECT a.id, a.url, a.title, a.source, a.source_lean, a.published_at,
-            a.description, a.entities, a.event_terms, a.ai_mode,
-            e.evidence_summary, e.search_text AS evidence_search_text,
-            e.claims, e.timeline, e.disputed_points,
-            e.confidence AS evidence_confidence
-     FROM articles a
-     LEFT JOIN article_evidence e ON e.article_id = a.id
-     WHERE a.id = $1 AND a.ai_mode <> 'denied'`,
+    'SELECT id, title, source, source_lean, published_at, content FROM articles WHERE id = $1',
     [articleId]
   )
   const a = result.rows[0] as ArticleRow | undefined
   if (!a) return null
   const block = [
-    'The user is viewing this attributed publisher link. The app does not store a copy of the article body. Structured evidence below was paraphrased during ingestion; attribute outlet-specific claims and do not infer details that are absent:',
+    'The user is currently viewing this news article; unless they clearly ask about something else, treat their questions as being about it:',
     `Title: ${clamp(a.title ?? 'Untitled', TITLE_CLAMP)}`,
     `Source: ${a.source} (${leanLabel(a.source_lean)}) — published ${day(a.published_at)}`,
-    a.ai_mode === 'permitted_text' && a.description
-      ? `Permitted description: ${clamp(a.description, DESCRIPTION_CLAMP)}`
-      : a.ai_mode === 'structured_evidence' && a.evidence_summary
-        ? `Evidence summary: ${clamp(a.evidence_summary, 500)}`
-        : 'Available context: headline, source, date, and story metadata only.',
-    a.ai_mode === 'structured_evidence'
-      ? (a.claims ?? []).slice(0, 4).map((claim) =>
-          claim.claim ? `Attributed claim: ${clamp(claim.claim, 240)}` : ''
-        ).filter(Boolean).join('\n')
-      : '',
+    `Excerpt: ${clamp(a.content ?? '', SUBJECT_CLAMP)}`,
   ].join('\n')
-  return {
-    block,
-    seed: `${a.title ?? ''} ${(a.entities ?? []).join(' ')} ${(a.event_terms ?? []).join(' ')}`,
-  }
+  return { block, seed: `${a.title ?? ''} ${(a.content ?? '').slice(0, 400)}` }
 }
 
 export async function postSubject(postId: string): Promise<Subject | null> {
@@ -408,7 +325,7 @@ export async function postSubject(postId: string): Promise<Subject | null> {
     p.position != null
       ? `The app's bias scorer places this post ${leanLabel(p.position)} (${Number(p.position).toFixed(2)} on a 0=left…1=right scale).`
       : '',
-    `Post: ${clamp(p.content ?? '', USER_SUBJECT_CLAMP)}`,
+    `Post: ${clamp(p.content ?? '', SUBJECT_CLAMP)}`,
   ]
     .filter(Boolean)
     .join('\n')
