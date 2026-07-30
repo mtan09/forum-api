@@ -3,12 +3,16 @@ import pool from '../src/db'
 import { buildStructuredEvidence } from '../src/ingest/article-evidence'
 import { cacheManagedArticleImage, managedArticleImagesConfigured } from '../src/ingest/article-image'
 import { extractArticleText } from '../src/ingest/extract'
+import { toHashtags } from '../src/ingest/keywords'
 import { RIGHTS_POLICY_VERSION, rightsForSource } from '../src/ingest/source-rights'
 import { SOURCES } from '../src/ingest/sources'
+import { matchTopic } from '../src/ingest/topics'
+import { scoreArticle } from '../src/scoring/score'
 
 const APPLY = process.env.APPLY_ARTICLE_ANALYSIS_BACKFILL === 'true'
 const LIMIT = Math.max(1, Number(process.env.ARTICLE_BACKFILL_LIMIT ?? 50))
-const slugByName = new Map(SOURCES.map((source) => [source.name, source.slug]))
+const DAYS = Math.max(1, Number(process.env.ARTICLE_BACKFILL_DAYS ?? 14))
+const sourceByName = new Map(SOURCES.map((source) => [source.name, source]))
 
 async function main() {
   const candidates = await pool.query(
@@ -17,15 +21,18 @@ async function main() {
      LEFT JOIN article_evidence e ON e.article_id = a.id
      WHERE a.status = 'ready'
        AND (e.article_id IS NULL OR a.rights_policy_version IS DISTINCT FROM $1)
+       AND COALESCE(a.published_at, a.created_at) > NOW() - ($3 * INTERVAL '1 day')
+       AND COALESCE(a.political_relevance, 0) >= 0.1
      ORDER BY COALESCE(a.published_at, a.created_at) DESC
      LIMIT $2`,
-    [RIGHTS_POLICY_VERSION, LIMIT]
+    [RIGHTS_POLICY_VERSION, LIMIT, DAYS]
   )
   if (!APPLY) {
     console.log(JSON.stringify({
       apply: false,
       candidates: candidates.rowCount ?? 0,
       limit: LIMIT,
+      days: DAYS,
       note: 'Set APPLY_ARTICLE_ANALYSIS_BACKFILL=true to process this batch.',
     }, null, 2))
     return
@@ -37,7 +44,8 @@ async function main() {
   for (const row of candidates.rows) {
     try {
       const sourceName = String(row.source ?? '')
-      const rights = rightsForSource(slugByName.get(sourceName) ?? '')
+      const source = sourceByName.get(sourceName)
+      const rights = rightsForSource(source?.slug ?? '')
       const extracted = await extractArticleText({
         title: String(row.title ?? ''),
         url: String(row.url),
@@ -54,6 +62,14 @@ async function main() {
         analysisText: extracted.analysisText,
         extractionMethod: extracted.analysisMethod,
       })
+      const score = scoreArticle({
+        title: String(row.title ?? ''),
+        content: extracted.analysisText,
+        url: String(row.url),
+        sourcePrior: source?.lean,
+        categories: [],
+      })
+      const topic = await matchTopic(evidence.searchText)
       const sourceImage = extracted.imageUrl
       const wantsManaged = Boolean(
         sourceImage &&
@@ -104,29 +120,61 @@ async function main() {
         await client.query(
           `UPDATE articles
            SET content = NULL,
-               entities = $2, event_terms = $3, search_text = $4,
-               rights_policy_version = $5, ai_mode = $6,
-               media_source_url = $7,
-               media = COALESCE($8, $7),
-               media_thumbnail_url = $9,
-               media_large_url = $8,
-               media_width = $10,
-               media_height = $11,
-               media_source_hash = $12,
-               media_status = CASE WHEN $7::text IS NULL THEN 'none'
-                                   WHEN $8::text IS NOT NULL THEN 'ready'
+               entities = $2, event_terms = $3, hashtags = $4, search_text = $5,
+               rights_policy_version = $6, ai_mode = $7,
+               media_source_url = $8,
+               media = COALESCE($9, $8),
+               media_thumbnail_url = $10,
+               media_large_url = $9,
+               media_width = $11,
+               media_height = $12,
+               media_source_hash = $13,
+               media_status = CASE WHEN $8::text IS NULL THEN 'none'
+                                   WHEN $9::text IS NOT NULL THEN 'ready'
                                    ELSE 'ready' END,
-               media_cached_at = CASE WHEN $8::text IS NOT NULL THEN NOW() ELSE NULL END,
-               media_expires_at = $13,
-               image_mode = CASE WHEN $7::text IS NULL THEN 'none'
-                                 WHEN $8::text IS NOT NULL THEN 'managed_thumbnail'
-                                 ELSE 'remote_no_cache' END
+               media_cached_at = CASE WHEN $9::text IS NOT NULL THEN NOW() ELSE NULL END,
+               media_expires_at = $14,
+               image_mode = CASE WHEN $8::text IS NULL THEN 'none'
+                                 WHEN $9::text IS NOT NULL THEN 'managed_thumbnail'
+                                 ELSE 'remote_no_cache' END,
+               political_lean = $15,
+               political_relevance = $16,
+               lean_confidence = $17,
+               content_type = $18,
+               lean_signals = $19,
+               source_lean = $20,
+               scorer_version = $21,
+               general_topic_id = $22
            WHERE id = $1`,
           [
-            row.id, evidence.entities, evidence.eventTerms, evidence.searchText,
-            RIGHTS_POLICY_VERSION, rights.ai, sourceImage, cached?.largeUrl ?? null,
-            cached?.thumbnailUrl ?? null, cached?.width ?? null, cached?.height ?? null,
-            cached?.sourceHash ?? null, cached?.expiresAt ?? null,
+            row.id,
+            evidence.entities,
+            evidence.eventTerms,
+            toHashtags(evidence.eventTerms),
+            evidence.searchText,
+            RIGHTS_POLICY_VERSION,
+            rights.ai,
+            sourceImage,
+            cached?.largeUrl ?? null,
+            cached?.thumbnailUrl ?? null,
+            cached?.width ?? null,
+            cached?.height ?? null,
+            cached?.sourceHash ?? null,
+            cached?.expiresAt ?? null,
+            score.political_lean,
+            score.political_relevance,
+            score.lean_confidence,
+            score.content_type,
+            [
+              ...score.lean_signals,
+              `rights:${rights.analysis}`,
+              `evidence:${evidence.generatedBy}`,
+              `extraction:${extracted.analysisMethod}`,
+              `policy:${RIGHTS_POLICY_VERSION}`,
+            ],
+            source?.lean ?? null,
+            score.scorer_version,
+            topic.generalTopicId,
           ]
         )
         await client.query('COMMIT')

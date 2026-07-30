@@ -105,13 +105,15 @@ The backfill command is a read-only preview unless explicitly enabled:
 
 ```bash
 ARTICLE_BACKFILL_LIMIT=50 \
+ARTICLE_BACKFILL_DAYS=14 \
 APPLY_ARTICLE_ANALYSIS_BACKFILL=true \
 npm run backfill:article-evidence
 ```
 
-Run small recent-first batches. Each successful row writes evidence and managed
-media in a transaction, sets `articles.content` to `NULL`, and moves the row to
-the current policy. Then:
+Run small recent-first batches. The backfill ignores legacy rows below the
+political-relevance gate, rescores each selected article while transient text
+is available, then transactionally writes evidence/media, sets
+`articles.content` to `NULL`, and moves the row to the current policy. Then:
 
 ```bash
 npm run verify:article-analysis
