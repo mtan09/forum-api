@@ -1,4 +1,4 @@
-// Ingestion pipeline: RSS feeds → dedupe → extract text → relevance
+// Ingestion pipeline: RSS feeds → dedupe → rights-aware metadata → relevance
 // gate → deterministic scoring → insert as 'ready'. Idempotent — the
 // articles.url and articles.content_hash UNIQUE constraints make
 // re-runs no-ops for already-seen items.
@@ -7,16 +7,22 @@ import { createHash } from 'node:crypto'
 import pool, { query } from '../db'
 import { captureException, captureMessage } from '../lib/sentry'
 import { scoreArticle } from '../scoring/score'
+import { buildArticleMetadata } from './article-metadata'
 import { clusterAndPublish } from './cluster'
 import { extractArticleText } from './extract'
-import { extractKeywords, toHashtags } from './keywords'
 import { fetchFeed } from './rss'
+import { RIGHTS_POLICY_VERSION, rightsForSource } from './source-rights'
 import { SOURCES, type Source } from './sources'
 import { matchTopic } from './topics'
 
 // Override for one-off backfills: INGEST_MAX_ITEMS=50 npm run ingest
 const MAX_ITEMS_PER_FEED = Number(process.env.INGEST_MAX_ITEMS) || 10
-const MIN_RELEVANCE = 0.25
+// Headlines carry less evidence than copied article bodies. Curated feeds are
+// already politics-focused, so keep a modest gate and report low confidence
+// instead of silently losing relevant coverage.
+const MIN_RELEVANCE = 0.1
+const CLEARLY_NONPOLITICAL_CATEGORY =
+  /\b(?:sports?|entertainment|celebrity|fashion|food|recipes?|travel|horoscope|gaming)\b/i
 
 export type IngestStats = {
   feedsOk: number
@@ -65,6 +71,8 @@ const dbQuery = (text: string, params?: unknown[]) =>
   withRetry('database operation', () => query(text, params), isDatabaseConnectionError)
 
 async function ingestSource(source: Source, stats: IngestStats) {
+  const rights = rightsForSource(source.slug)
+  if (rights.acquisition === 'disabled') return
   let hadFeedFailure = false
   for (const feedUrl of source.feeds) {
     let items
@@ -86,7 +94,9 @@ async function ingestSource(source: Source, stats: IngestStats) {
       stats.seen++
       if (!item.title) continue
 
-      // Cheap dedupe before doing any page fetching
+      // Cheap dedupe before any additional processing. Ingestion never falls
+      // through to a publisher-page fetch unless a reviewed policy explicitly
+      // enables that mode (none do in the initial registry).
       const contentHash = createHash('sha256')
         .update(`${source.name}::${item.title.toLowerCase()}`)
         .digest('hex')
@@ -99,43 +109,65 @@ async function ingestSource(source: Source, stats: IngestStats) {
         continue
       }
 
-      const extracted = await extractArticleText(item)
+      const extracted = await extractArticleText(item, rights)
+      const metadata = buildArticleMetadata(item.title, source.name, item.categories)
+      const analysisText = [
+        extracted.analysisText,
+        item.categories.slice(0, 8).join(' '),
+      ].filter(Boolean).join(' ')
       const score = scoreArticle({
         title: item.title,
-        content: extracted.text,
+        content: analysisText,
         url: item.url,
         sourcePrior: source.lean,
         categories: item.categories,
       })
+      const clearlyNonpolitical = item.categories.some((category) =>
+        CLEARLY_NONPOLITICAL_CATEGORY.test(category)
+      )
+      const politicalRelevance =
+        rights.analysis === 'metadata_only' && !clearlyNonpolitical
+          ? Math.max(score.political_relevance, 0.25)
+          : score.political_relevance
 
-      if (score.political_relevance < MIN_RELEVANCE) {
+      if (politicalRelevance < MIN_RELEVANCE) {
         stats.skippedIrrelevant++
         continue
       }
 
-      const topic = await matchTopic(`${item.title} ${extracted.text}`)
-      // Auto-hashtags from the article's own keywords; subtopic_id is
-      // assigned afterwards by the clustering pass, not here
-      const hashtags = toHashtags(extractKeywords(item.title, extracted.text).top)
+      const topic = await matchTopic(metadata.searchText)
+      const leanSignals = [
+        ...score.lean_signals,
+        `rights:${rights.analysis}`,
+        `policy:${RIGHTS_POLICY_VERSION}`,
+      ]
 
       const inserted = await dbQuery(
         `INSERT INTO articles
-           (url, content_hash, title, source, content, media,
+           (url, content_hash, title, source, content, description, media,
             political_lean, political_relevance, lean_confidence,
             content_type, lean_signals, source_lean, scorer_version,
-            general_topic_id, hashtags, published_at, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'ready')
+            general_topic_id, hashtags, entities, event_terms, search_text,
+            text_mode, image_mode, ai_mode, rights_policy_version,
+            published_at, status)
+         VALUES (
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+           $19,$20,$21,$22,$23,$24,'ready'
+         )
          ON CONFLICT DO NOTHING`,
         [
           item.url, contentHash, item.title, source.name,
-          extracted.text, extracted.imageUrl,
-          score.political_lean, score.political_relevance, score.lean_confidence,
-          score.content_type, score.lean_signals, source.lean, score.scorer_version,
-          topic.generalTopicId, hashtags, extracted.publishedAt,
+          extracted.analysisText || null, extracted.publicDescription, extracted.imageUrl,
+          score.political_lean, politicalRelevance, score.lean_confidence,
+          score.content_type, leanSignals, source.lean, score.scorer_version,
+          topic.generalTopicId, metadata.hashtags, metadata.entities,
+          metadata.eventTerms, metadata.searchText,
+          rights.publicText, rights.image, rights.ai, RIGHTS_POLICY_VERSION,
+          extracted.publishedAt,
         ]
       )
       stats.inserted += inserted.rowCount ?? 0
-      await sleep(250) // stay polite to article pages
+      await sleep(25)
     }
   }
   if (hadFeedFailure && !stats.sourcesFailed.includes(source.name)) {

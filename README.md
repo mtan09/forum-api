@@ -13,22 +13,22 @@ Backend for the forum app (`../forum`). Hono + Postgres, self-managed JWT auth, 
 | News + scoring | `npm run ingest` | Dedicated hourly Railway cron with locking, retries, and persistent run status |
 | AI chat | `POST /ai/chat` streamed (SSE) via OpenAI (`gpt-5.4-nano`) | Set `OPENAI_API_KEY` |
 
-## News ingestion, bias scoring & hot-topic clustering
+## Rights-aware news ingestion, bias scoring & hot-topic clustering
 
-The article feed is real: `src/ingest/` pulls RSS from ~59 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept ~even between left/center/right), extracts full text, dedupes by URL/content hash, gates on political relevance, auto-derives hashtags and a background general topic, scores, and inserts as `ready`. Run once with `npm run ingest`. Production runs the same command in a dedicated hourly Railway cron service; the API process never schedules ingestion.
+The article feed pulls RSS from 58 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept approximately even between left/center/right), dedupes by URL/title hash, derives headline entities/event terms/hashtags, assigns a background topic, scores the available metadata, and inserts as `ready`. Run once with `npm run ingest`. Production runs the same command in a dedicated hourly Railway cron service; the API process never schedules ingestion.
 
-Publisher data is treated as untrusted. Image selection prefers a feed's canonical enclosure, validates every source with the same URL rules, rejects malformed article-URL-plus-caption metadata, and falls back to a valid page image. Full-text extraction rejects timestamp-heavy video-player/navigation rails from any publisher and falls back to the cleaner RSS text instead, so unrelated video headlines do not pollute scoring or story summaries.
+Publisher use is deny-by-default and separately controlled for acquisition, public text, internal analysis, forumAI, and images in `src/ingest/source-rights.ts`. RSS availability is not treated as permission to reuse a feed body or photograph. The initial registry keeps every outlet discoverable as headline/link metadata but enables no publisher-page fetches and no publisher images. The old readability extractor dependency has been removed. See [`docs/ARTICLE_RIGHTS.md`](docs/ARTICLE_RIGHTS.md) for policy invariants and rollout.
 
-**Nothing is hand-written.** After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles into stories: each article is compared with a fixed founding-story profile, followed by a union-find merge pass over fixed profiles, so a cluster cannot accumulate vocabulary and snowball into unrelated topics. Automatic article membership is rebuilt on every clustering run rather than retaining stale links. Clusters with 3+ articles from 2+ outlets become subtopics — the "hot topics" carousel (`GET /topics/hot`) and their blurb/summary screens are generated **extractively**: the title is a real member headline (preferring outlets nearest the center), the short blurb is a lead sentence, and the long summary quotes one clean, word-boundary-capped lead (260 characters maximum) per spectrum band ("From the left (…): … / From the center: … / From the right: …"). `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts. Deterministic — no LLM anywhere in the pipeline.
+After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles using headlines, named entities, event terms, outlet diversity, and time. Each article is compared with a fixed founding-story profile, followed by a fixed-profile merge pass, so a cluster cannot snowball into unrelated topics. Automatic membership is rebuilt on every run. Clusters with 3+ articles from 2+ outlets become subtopics: the title is a member headline, the short summary is an original coverage note, and the long summary compares one attributed headline from each available spectrum band. No article-body sentences are lifted. `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts.
 
 **Hashtags** are the organizing layer instead of fixed categories: articles get them auto-extracted from their keywords; users pick their own when posting (`POST /posts` accepts `hashtags[]`, plus inline `#tags` in the text). The 7 general topics still exist silently as background metadata.
 
 Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
-- **Lean (0 = left, 1 = right):** starts from the outlet's published lean rating (AllSides/Ad Fontes approximations in `sources.ts`), then shifts by at most ±0.25 based on partisan framing vocabulary in the text (Gentzkow–Shapiro-style term pairs: "estate tax"/"death tax", "undocumented"/"illegal alien", ...). Framing counts only outside quotations and is capped per term.
-- **Fact vs. opinion:** a separate subjectivity score (loaded language, first person, opinion markers, quote density) plus URL/section heuristics classifies each piece as `factual_report` / `news_report` / `analysis` / `opinion`. The app shows reporting with a "Source Lean" bar and a badge instead of claiming the article itself has a measured slant.
+- **Lean (0 = left, 1 = right):** begins with the outlet prior and may shift from framing present in rights-permitted metadata. Metadata-only articles carry lower evidence than the old copied-body model; receipts expose this limitation rather than claiming body-level analysis.
+- **Fact vs. opinion:** URL sections, feed categories, and permitted text classify `factual_report` / `news_report` / `analysis` / `opinion`. Headline-only rows do not pretend to have body-derived subjectivity evidence.
 - **Posts:** no outlet prior exists, so post placement combines partisan framing with a versioned US issue-and-stance ontology (`src/scoring/stances.ts`). The ontology recognizes explicit propositions such as requiring congressional authorization for war, expanding immigration pathways, strengthening collective bargaining, or cutting federal spending. Posts with no directional evidence store `NULL` rather than being falsely labeled center; genuine mixed evidence can still land at 0.5.
-- **Reproducible by construction:** the entire scale is committed lexicons, stance rules, and fixed weights (`src/scoring/lexicons.ts`, `stances.ts`, `score.ts`). Every score stores the signals that produced it (`lean_signals` / `position_signals`) and its `scorer_version` — surfaced verbatim in the app's **scorer receipts** UI. Changing any lexicon, stance, weight, or prior = bump `SCORER_VERSION` and `npm run rescore` to recompute everything from stored text. `npm run audit:posts` is a read-only preview of current versus proposed post scores.
+- **Reproducible by construction:** the entire scale is committed lexicons, stance rules, fixed weights, and source-policy version. `npm run rescore` recomputes article scores from rights-safe `search_text`, not legacy bodies.
 
 ## User spectrum, The Floor & moderation
 
@@ -61,7 +61,7 @@ Local seed accounts are development fixtures only. Set or rotate their
 passwords locally after seeding; production and App Review credentials must
 never be written in this repository.
 
-`npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image validation, extracted-content quality, and bounded summary leads); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
+`npm test` runs the vitest suite, including complete source-policy coverage, deny-by-default feed handling, raw-content API exclusion, image masking, metadata extraction, scorer determinism, rate limiting, and moderation. CI runs typecheck + tests on every push.
 
 Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins), and `seed:stances` (focused left/right/mixed scoring fixture for an existing mock community). The expansion includes the same substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
 
@@ -95,7 +95,7 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `GET /debates` · `/debates/recap` · `/debates/:id` | ✅ | Today's Floor rooms, yesterday's recap, one room + distribution |
 | `POST /debates/:id/vote` `{position: 0..1}` | ✅ | Drop / move your pin |
 | `POST /bookmarks/toggle` `{post_id?\|article_id?}` · `GET /bookmarks` | ✅ | Save/unsave; list saved posts + articles |
-| `GET /search?q=&topic_id=` | ✅ | Ranked article/post search with matching story clusters and full-corpus counts; `topic_id` opens the complete result set for a hot story |
+| `GET /search?q=&topic_id=` | ✅ | Ranked article/post search with matching story clusters and full-corpus counts; exact metadata matches rank first, adjacent headline/event phrases add controlled recall, and counts use the same predicate as results |
 | `GET /sources/:name` | — | Source detail: rating, stats, content mix, recent coverage |
 | `GET /messages` · `/unread-count` · `/with/:userId` | ✅ | DM inbox, unread total, and a read-marking conversation thread |
 | `POST /messages/with/:userId` `{content}` | ✅ | Send a block-aware, rate-limited direct message |
@@ -105,6 +105,7 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `GET /admin/feedback` · `PATCH /admin/feedback/:id` | Admin | Triage feedback, status, and notes |
 | `GET /admin/moderation` · `POST /admin/moderation/:id/resolve` | Admin | Review flagged existing-corpus records |
 | `GET /admin/ingest-status` | Admin | Recent ingest runs, freshness, and source failures |
+| `GET /admin/source-rights` | Admin | Reviewed policy and active text/AI/image modes for all publishers |
 | `POST /storage/upload?filename=x.jpg` (raw bytes) | ✅ | Image upload → `{url}` (disk in dev, R2 when configured) |
 | `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream, grounded in the article corpus |
 | `GET /legal/terms` · `/legal/privacy` | — | Public legal pages |
@@ -114,7 +115,7 @@ Auth: `Authorization: Bearer <jwt>`. Errors: `{error: string}` with a meaningful
 
 ## forumAI
 
-`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over the app's own recent article corpus. Topic-specific prompts use keyword relevance; broad prompts about the biggest story or latest headlines automatically use the generated hot-story index and recent articles, so an `article_id` is not required. Retrieved coverage is balanced across source-lean bands when the corpus permits and injected as context without adding an LLM to retrieval or scoring. Passing `article_id` or `post_id` still pins the chat to that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
+`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`). Rights-aware retrieval uses headline, source, date, entity, event, and policy-approved description metadata. A headline is presented to the model only as evidence that an outlet covered/framed a story that way, never as proof of unstated article details. Full text can enter grounding only when a future source policy explicitly records that permission.
 
 ## Configuration and secrets
 
@@ -130,7 +131,7 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 revokes the documented demo login while retaining its authored content.
+1. Apply numbered migrations before deploying a new mobile binary. For migration 017, follow the staged commands in `docs/ARTICLE_RIGHTS.md`; destructive legacy cleanup is a separate explicit step.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.

@@ -1,11 +1,11 @@
-// Grounding context for forumAI — deterministic retrieval over the app's
-// own ingested articles. No embeddings, no external search: the same
-// keyword machinery that drives hashtags and clustering ranks recent
-// articles against the question. Every output here is clamped hard so the
-// prompt can never balloon no matter how big the corpus gets.
+// Rights-aware grounding context for forumAI. Restricted sources contribute
+// only headline/link metadata. Description text is included only when the
+// article row records an affirmative AI permission.
 
 import { query } from '../db'
+import { metadataKeywordProfile } from '../ingest/article-metadata'
 import { extractKeywords, keywordSimilarity, type Keywords } from '../ingest/keywords'
+import { RIGHTS_POLICY_VERSION } from '../ingest/source-rights'
 
 const RECENT_DAYS = 14
 const CANDIDATE_LIMIT = 400
@@ -13,8 +13,8 @@ const MAX_COVERAGE_ITEMS = 5
 const MAX_PER_OUTLET = 2
 const MIN_SHARED_TERMS = 2
 const TITLE_CLAMP = 140
-const LEAD_CLAMP = 220
-const SUBJECT_CLAMP = 900
+const DESCRIPTION_CLAMP = 220
+const USER_SUBJECT_CLAMP = 900
 const COVERAGE_CLAMP = 2600
 
 export type CoverageIntent = 'top_story' | 'latest' | 'relevance'
@@ -108,7 +108,11 @@ type ArticleRow = {
   source: string | null
   source_lean: number | null
   published_at: string | null
-  content: string | null
+  url: string | null
+  description: string | null
+  entities: string[]
+  event_terms: string[]
+  ai_mode: 'metadata_only' | 'permitted_text' | 'denied'
   subtopic_id?: string | null
 }
 
@@ -121,7 +125,11 @@ type StoryRow = {
 }
 
 function articleLine(a: ArticleRow): string {
-  return `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}: ${clamp(a.content ?? '', LEAD_CLAMP)}`
+  const permittedDescription =
+    a.ai_mode === 'permitted_text' && a.description
+      ? ` Permitted description: ${clamp(a.description, DESCRIPTION_CLAMP)}`
+      : ''
+  return `- Headline: "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}.${permittedDescription}`
 }
 
 function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] {
@@ -157,9 +165,11 @@ function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] 
 
 async function latestCoverage(excludeId?: string | null): Promise<string> {
   const result = await query(
-    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+    `SELECT id, url, title, source, source_lean, published_at, description,
+            entities, event_terms, ai_mode, subtopic_id
      FROM articles
      WHERE status = 'ready' AND title IS NOT NULL
+       AND ai_mode <> 'denied'
        AND id <> COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
        AND COALESCE(published_at, created_at) > NOW() - INTERVAL '3 days'
      ORDER BY published_at DESC NULLS LAST
@@ -173,21 +183,25 @@ async function latestCoverage(excludeId?: string | null): Promise<string> {
 
 async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): Promise<string> {
   const storiesResult = await query(
-    `SELECT id, title, short_summary, volume, score
+    `SELECT id, title,
+            CASE WHEN summary_policy_version = $2 THEN short_summary ELSE NULL END AS short_summary,
+            volume, score
      FROM subtopics
      WHERE cluster_key IS NOT NULL AND score > 0
        AND updated_at > NOW() - INTERVAL '7 days'
      ORDER BY score DESC, updated_at DESC
      LIMIT $1`,
-    [topicLimit]
+    [topicLimit, RIGHTS_POLICY_VERSION]
   )
   const stories = storiesResult.rows as StoryRow[]
   if (stories.length === 0) return latestCoverage(excludeId)
 
   const articleResult = await query(
-    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+    `SELECT id, url, title, source, source_lean, published_at, description,
+            entities, event_terms, ai_mode, subtopic_id
      FROM articles
      WHERE status = 'ready' AND subtopic_id = ANY($1::uuid[])
+       AND ai_mode <> 'denied'
        AND id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
      ORDER BY published_at DESC NULLS LAST`,
     [stories.map((story) => story.id), excludeId ?? null]
@@ -198,7 +212,7 @@ async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): 
   let budget = COVERAGE_CLAMP
 
   for (const story of stories) {
-    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, LEAD_CLAMP)}` : ''}`
+    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, DESCRIPTION_CLAMP)}` : ''}`
     if (storyLine.length + 1 > budget) break
     lines.push(storyLine)
     budget -= storyLine.length + 1
@@ -227,9 +241,11 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   if (qk.terms.size === 0) return ''
 
   const result = await query(
-    `SELECT id, title, source, source_lean, published_at, content
+    `SELECT id, url, title, source, source_lean, published_at, description,
+            entities, event_terms, ai_mode
      FROM articles
      WHERE status = 'ready' AND title IS NOT NULL
+       AND ai_mode <> 'denied'
        AND COALESCE(published_at, created_at) > NOW() - INTERVAL '${RECENT_DAYS} days'
      ORDER BY published_at DESC NULLS LAST
      LIMIT ${CANDIDATE_LIMIT}`
@@ -245,7 +261,14 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   const scored = (result.rows as ArticleRow[])
     .filter((a) => a.id !== excludeId)
     .map((a) => {
-      const profile = extractKeywords(a.title ?? '', a.content ?? '', 400)
+      const permittedDescription =
+        a.ai_mode === 'permitted_text' ? a.description ?? '' : ''
+      const profile = metadataKeywordProfile(
+        a.title ?? '',
+        a.entities ?? [],
+        a.event_terms ?? [],
+        permittedDescription
+      )
       const { roots, bigram } = sharedConcepts(qk, profile)
       return { a, roots, bigram, sim: keywordSimilarity(qk, profile) }
     })
@@ -295,18 +318,25 @@ export type Subject = { block: string; seed: string }
 
 export async function articleSubject(articleId: string): Promise<Subject | null> {
   const result = await query(
-    'SELECT id, title, source, source_lean, published_at, content FROM articles WHERE id = $1',
+    `SELECT id, url, title, source, source_lean, published_at, description,
+            entities, event_terms, ai_mode
+     FROM articles WHERE id = $1 AND ai_mode <> 'denied'`,
     [articleId]
   )
   const a = result.rows[0] as ArticleRow | undefined
   if (!a) return null
   const block = [
-    'The user is currently viewing this news article; unless they clearly ask about something else, treat their questions as being about it:',
+    'The user is viewing this news link. The app has publisher metadata, not a copy of the article. Do not claim the headline proves details that are not present:',
     `Title: ${clamp(a.title ?? 'Untitled', TITLE_CLAMP)}`,
     `Source: ${a.source} (${leanLabel(a.source_lean)}) — published ${day(a.published_at)}`,
-    `Excerpt: ${clamp(a.content ?? '', SUBJECT_CLAMP)}`,
+    a.ai_mode === 'permitted_text' && a.description
+      ? `Permitted description: ${clamp(a.description, DESCRIPTION_CLAMP)}`
+      : 'Available context: headline, source, date, and story metadata only.',
   ].join('\n')
-  return { block, seed: `${a.title ?? ''} ${(a.content ?? '').slice(0, 400)}` }
+  return {
+    block,
+    seed: `${a.title ?? ''} ${(a.entities ?? []).join(' ')} ${(a.event_terms ?? []).join(' ')}`,
+  }
 }
 
 export async function postSubject(postId: string): Promise<Subject | null> {
@@ -325,7 +355,7 @@ export async function postSubject(postId: string): Promise<Subject | null> {
     p.position != null
       ? `The app's bias scorer places this post ${leanLabel(p.position)} (${Number(p.position).toFixed(2)} on a 0=left…1=right scale).`
       : '',
-    `Post: ${clamp(p.content ?? '', SUBJECT_CLAMP)}`,
+    `Post: ${clamp(p.content ?? '', USER_SUBJECT_CLAMP)}`,
   ]
     .filter(Boolean)
     .join('\n')

@@ -98,7 +98,7 @@ Today's date is ${new Date().toISOString().slice(0, 10)}. Your training data may
     subjectBlock ? `\n\n${subjectBlock}` : ''
   }${
     coverageBlock
-      ? `\n\nRecent coverage from the app's news feed. Ground your answers in it when relevant, name the outlet when you draw on a specific article, and never invent coverage that is not listed:\n${coverageBlock}`
+      ? `\n\nRecent coverage from the app's news feed. Most entries are publisher metadata only. Treat a headline as evidence that an outlet covered and framed a story that way, not as proof of unstated facts. Ground your answers only in details actually present, name the outlet when you use a headline, and never invent article contents:\n${coverageBlock}`
       : ''
   }`
 

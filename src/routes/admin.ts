@@ -1,5 +1,7 @@
 import { Hono } from 'hono'
 import { query } from '../db'
+import { RIGHTS_POLICY_VERSION, rightsForSource } from '../ingest/source-rights'
+import { SOURCES } from '../ingest/sources'
 import { signedFeedbackUrl } from '../lib/r2'
 import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
@@ -204,6 +206,20 @@ admin.get('/ingest-status', async (c) => {
   return c.json({
     runs: result.rows,
     last_success_at: latestSuccess.rows[0]?.completed_at ?? null,
+  })
+})
+
+// Reviewed publisher policy state used by ingestion. This makes the
+// deny-by-default decisions inspectable without exposing them publicly.
+admin.get('/source-rights', async (c) => {
+  return c.json({
+    policy_version: RIGHTS_POLICY_VERSION,
+    sources: SOURCES.map((source) => ({
+      name: source.name,
+      slug: source.slug,
+      lean: source.lean,
+      ...rightsForSource(source.slug),
+    })),
   })
 })
 

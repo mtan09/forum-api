@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS subtopics (
   keywords          TEXT[] DEFAULT '{}',
   volume            INTEGER DEFAULT 0,
   public_position   FLOAT CHECK (public_position BETWEEN 0 AND 1),
-  image_urls        TEXT[] DEFAULT '{}'
+  image_urls        TEXT[] DEFAULT '{}',
+  cluster_key       TEXT UNIQUE,
+  score             FLOAT DEFAULT 0,
+  summary_policy_version TEXT,
+  updated_at        TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -60,6 +64,7 @@ CREATE TABLE IF NOT EXISTS posts (
   position_confidence FLOAT CHECK (position_confidence BETWEEN 0 AND 1),
   position_signals    TEXT[] DEFAULT '{}',
   scorer_version      TEXT,
+  hashtags            TEXT[] NOT NULL DEFAULT '{}',
   upvotes             INTEGER DEFAULT 0,
   downvotes           INTEGER DEFAULT 0,
   commentcount        INTEGER DEFAULT 0,
@@ -76,7 +81,19 @@ CREATE TABLE IF NOT EXISTS articles (
   title               TEXT,
   source              TEXT,
   content             TEXT,
+  description         TEXT,
   media               TEXT,
+  entities            TEXT[] NOT NULL DEFAULT '{}',
+  event_terms         TEXT[] NOT NULL DEFAULT '{}',
+  hashtags            TEXT[] NOT NULL DEFAULT '{}',
+  search_text         TEXT NOT NULL DEFAULT '',
+  text_mode           TEXT NOT NULL DEFAULT 'headline_only'
+                        CHECK (text_mode IN ('headline_only', 'feed_description', 'full_text')),
+  image_mode          TEXT NOT NULL DEFAULT 'none'
+                        CHECK (image_mode IN ('none', 'remote_no_cache', 'licensed_cache')),
+  ai_mode             TEXT NOT NULL DEFAULT 'metadata_only'
+                        CHECK (ai_mode IN ('metadata_only', 'permitted_text', 'denied')),
+  rights_policy_version TEXT,
   political_lean      FLOAT CHECK (political_lean BETWEEN 0 AND 1),
   political_relevance FLOAT CHECK (political_relevance BETWEEN 0 AND 1),
   lean_confidence     FLOAT CHECK (lean_confidence BETWEEN 0 AND 1),
@@ -92,7 +109,7 @@ CREATE TABLE IF NOT EXISTS articles (
   published_at        TIMESTAMPTZ,
   status              TEXT DEFAULT 'ready' CHECK (status IN ('pending', 'ready')),
   search_tsv          TSVECTOR GENERATED ALWAYS AS
-                        (to_tsvector('english', coalesce(title, '') || ' ' || left(coalesce(content, ''), 20000))) STORED,
+                        (to_tsvector('english', coalesce(search_text, ''))) STORED,
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 

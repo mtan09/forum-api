@@ -3,6 +3,7 @@ import pool, { query } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
+import { publicArticleFields } from '../lib/article-public'
 import type { AppEnv } from '../types'
 
 const users = new Hono<AppEnv>()
@@ -462,10 +463,8 @@ users.get('/me/upvoted', requireAuth, async (c) => {
       [userId]
     ),
     query(
-      `SELECT a.id, a.url, a.title, a.source, a.content, a.media, a.political_lean,
-         a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
-         a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
-         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, 'up' AS my_vote,
+      `SELECT ${publicArticleFields('a')},
+              'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
               v.created_at AS voted_at
        FROM article_votes v

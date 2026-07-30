@@ -3,12 +3,10 @@
 //
 // Replaces hand-written subtopics entirely. Deterministic, no LLM:
 //  1. Take recent scored articles (RECENT_DAYS window).
-//  2. Greedy leader clustering on keyword-profile similarity.
+//  2. Greedy leader clustering on headline/entity/event-term similarity.
 //  3. Keep clusters with enough articles from enough distinct outlets.
-//  4. Generate the blurb EXTRACTIVELY — title and summaries are real
-//     sentences lifted from member articles (preferring outlets nearest
-//     the center), with the long summary quoting one lead per spectrum
-//     band ("From the left/center/right: ...").
+//  4. Generate an original coverage note plus attributed headlines. Article
+//     body prose is never required or lifted into a summary.
 //  5. Match recent user posts to clusters by keyword/hashtag overlap;
 //     their scored positions become the cluster's public_position.
 //  6. Upsert into subtopics by cluster_key; stale clusters age out of
@@ -18,11 +16,12 @@
 // ============================================================
 
 import { query } from '../db'
-import { looksLikeVideoPlaylistChrome } from './content-quality'
+import { metadataKeywordProfile } from './article-metadata'
 import { extractKeywords, keywordSimilarity, toHashtags, type Keywords } from './keywords'
+import { RIGHTS_POLICY_VERSION } from './source-rights'
 
 const RECENT_DAYS = 7
-const SIM_THRESHOLD = 0.3     // join a cluster at ≥ this similarity to its leader
+const SIM_THRESHOLD = 0.23    // metadata profiles are shorter than article bodies
 const MIN_ARTICLES = 3        // a story needs corroboration...
 const MIN_OUTLETS = 2         // ...from more than one outlet
 const MAX_CLUSTERS = 12
@@ -31,7 +30,7 @@ const POST_MATCH_TERMS = 2    // keyword overlaps for a post to count toward a c
 export type ArticleRow = {
   id: string
   title: string
-  content: string
+  description: string | null
   source: string
   source_lean: number | null
   political_lean: number | null
@@ -39,30 +38,15 @@ export type ArticleRow = {
   published_at: string | null
   created_at: string
   media: string | null
+  image_mode: string
+  entities: string[]
+  event_terms: string[]
 }
 
 type Cluster = {
   members: ArticleRow[]
   profiles: Keywords[]
   leader: Keywords
-}
-
-// Site chrome and newsletter prompts that survive text extraction and
-// must never end up in a blurb.
-const JUNK_SENTENCE_RE = /skip to content|sign up|newsletter|your feedback|subscribe|advertisem|getty images|read more|continue reading|min read|^close\b|updated on \w+|published on \w+|^politics\b|watch live|^live updates|now playing|\bup next\b/i
-
-// Protect abbreviations ("U.S.", "Sen.") from the sentence splitter.
-const shieldDots = (text: string): string =>
-  text
-    .replace(/\b([A-Z])\./g, '$1․')
-    .replace(/\b(Mr|Mrs|Ms|Dr|Sen|Rep|Gov|Lt|Gen|Col|St|No|vs|Jr|Sr|Inc|Corp)\./g, '$1․')
-const unshieldDots = (text: string): string => text.replace(/․/g, '.')
-
-function sentenceSplit(text: string): string[] {
-  const shielded = shieldDots(text)
-  return (shielded.match(/[^.!?]+[.!?]+(?:["”’]|\s|$)/g) ?? [shielded])
-    .map((s) => unshieldDots(s).trim())
-    .filter(Boolean)
 }
 
 function truncateAtWord(text: string, maxChars: number): string {
@@ -73,26 +57,9 @@ function truncateAtWord(text: string, maxChars: number): string {
   return `${cut.trimEnd()}…`
 }
 
-// First 1–2 clean sentences, cut at a sentence boundary near maxChars.
-// The final hard cap also handles pages with one giant punctuation-free
-// block of navigation or video-player text.
+// Summaries may quote a source's headline, but never its stored article body.
 export function leadOf(article: ArticleRow, maxChars = 260): string {
-  if (looksLikeVideoPlaylistChrome(article.content)) {
-    return truncateAtWord(article.title, maxChars)
-  }
-  const sentences = sentenceSplit(article.content)
-    .filter((s) => s.length >= 40 && !JUNK_SENTENCE_RE.test(s))
-  let out = ''
-  for (const s of sentences) {
-    if (!out && s.length > maxChars) {
-      out = truncateAtWord(s, maxChars)
-      break
-    }
-    if (out && (out + ' ' + s).length > maxChars) break
-    out = out ? `${out} ${s}` : s
-    if (out.length >= maxChars * 0.6) break
-  }
-  return truncateAtWord(out || article.title, maxChars)
+  return truncateAtWord(article.title, maxChars)
 }
 
 const centrality = (a: ArticleRow) => Math.abs((a.source_lean ?? 0.5) - 0.5)
@@ -138,9 +105,29 @@ function spectrumSummary(members: ArticleRow[]): string {
   return parts.join('\n\n')
 }
 
-function clusterKey(top: string[]): string {
-  return top.filter((t) => !t.includes(' ')).slice(0, 3).sort().join('|')
+function coverageSummary(members: ArticleRow[]): string {
+  const outlets = [...new Set(members.map((member) => member.source))]
+  const shown = outlets.slice(0, 4)
+  const sourceList = shown.length > 1
+    ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}`
+    : shown[0]
+  const more = outlets.length > shown.length
+    ? `, plus ${outlets.length - shown.length} more`
+    : ''
+  return `${outlets.length} outlets are covering this story: ${sourceList}${more}. Open the coverage below to read each publisher's reporting.`
 }
+
+function clusterKey(top: string[]): string {
+  return top
+    .map((term) => term.replace(/^entity:/, ''))
+    .filter((term) => !term.includes(' '))
+    .slice(0, 3)
+    .sort()
+    .join('|')
+}
+
+const publicClusterTerms = (top: string[]) =>
+  top.map((term) => term.replace(/^entity:/, ''))
 
 function modeTopic(members: ArticleRow[]): string | null {
   const counts = new Map<string, number>()
@@ -168,10 +155,12 @@ function mergedProfile(profiles: Keywords[]): Keywords {
 
 export async function clusterAndPublish(): Promise<{ clusters: number; hot: string[] }> {
   const { rows: articles } = await query(
-    `SELECT id, title, content, source, source_lean, political_lean,
-            general_topic_id, published_at, created_at, media
+    `SELECT id, title, description, source, source_lean, political_lean,
+            general_topic_id, published_at, created_at,
+            CASE WHEN image_mode IN ('remote_no_cache', 'licensed_cache') THEN media ELSE NULL END AS media,
+            image_mode, entities, event_terms
      FROM articles
-     WHERE content IS NOT NULL AND scorer_version IS NOT NULL
+     WHERE title IS NOT NULL AND scorer_version IS NOT NULL AND status = 'ready'
        AND created_at > NOW() - INTERVAL '${RECENT_DAYS} days'
      ORDER BY created_at DESC, id`
   )
@@ -182,10 +171,11 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
   // from snowballing until it absorbs unrelated stories.
   const clusters: Cluster[] = []
   for (const article of articles as ArticleRow[]) {
-    const profileContent = looksLikeVideoPlaylistChrome(article.content)
-      ? article.title
-      : article.content
-    const profile = extractKeywords(article.title, profileContent)
+    const profile = metadataKeywordProfile(
+      article.title,
+      article.entities ?? [],
+      article.event_terms ?? []
+    )
     let best: Cluster | null = null
     let bestSim = 0
     for (const c of clusters) {
@@ -288,8 +278,9 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
     const upserted = await query(
       `INSERT INTO subtopics
          (general_topic_id, title, short_summary, long_summary, keywords,
-          volume, public_position, image_urls, cluster_key, score, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+          volume, public_position, image_urls, cluster_key, score,
+          summary_policy_version, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
        ON CONFLICT (cluster_key) DO UPDATE SET
          general_topic_id = EXCLUDED.general_topic_id,
          title = EXCLUDED.title,
@@ -300,19 +291,21 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
          public_position = EXCLUDED.public_position,
          image_urls = EXCLUDED.image_urls,
          score = EXCLUDED.score,
+         summary_policy_version = EXCLUDED.summary_policy_version,
          updated_at = NOW()
        RETURNING id`,
       [
         modeTopic(cluster.members),
         title,
-        leadOf(mostCentral(cluster.members), 180),
+        coverageSummary(cluster.members),
         spectrumSummary(cluster.members),
-        toHashtags(cluster.leader.top, 8),
+        toHashtags(publicClusterTerms(cluster.leader.top), 8),
         cluster.members.length + postMatches.length,
         publicPosition,
         cluster.members.map((m) => m.media).filter(Boolean).slice(0, 5),
         key,
         score,
+        RIGHTS_POLICY_VERSION,
       ]
     )
     await query(

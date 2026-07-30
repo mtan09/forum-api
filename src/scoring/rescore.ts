@@ -2,21 +2,24 @@
 // Re-runs the current scorer over every stored article and post.
 // Run this after any lexicon/weight/prior change (with SCORER_VERSION
 // bumped) so all stored scores are on the same scale again. Safe to
-// run anytime — it's a pure recomputation from stored text.
+// run anytime — article scoring uses rights-safe metadata, while user posts
+// continue to use their own submitted text.
 
 import 'dotenv/config'
 import pool, { query } from '../db'
+import { RIGHTS_POLICY_VERSION } from '../ingest/source-rights'
 import { sourcePrior } from '../ingest/sources'
 import { scoreArticle, scorePost, SCORER_VERSION } from './score'
 
 async function rescoreArticles(): Promise<number> {
   const { rows } = await query(
-    'SELECT id, url, title, source, content FROM articles WHERE content IS NOT NULL'
+    `SELECT id, url, title, source, search_text
+     FROM articles WHERE title IS NOT NULL`
   )
   for (const a of rows) {
     const score = scoreArticle({
       title: a.title ?? '',
-      content: a.content,
+      content: a.search_text ?? '',
       url: a.url,
       sourcePrior: sourcePrior(a.source),
     })
@@ -27,7 +30,8 @@ async function rescoreArticles(): Promise<number> {
        WHERE id = $1`,
       [
         a.id, score.political_lean, score.political_relevance,
-        score.lean_confidence, score.content_type, score.lean_signals,
+        score.lean_confidence, score.content_type,
+        [...score.lean_signals, 'rights:metadata_only', `policy:${RIGHTS_POLICY_VERSION}`],
         sourcePrior(a.source) ?? null, score.scorer_version,
       ]
     )
