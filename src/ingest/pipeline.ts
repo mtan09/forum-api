@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto'
 import pool, { query } from '../db'
 import { captureException, captureMessage } from '../lib/sentry'
 import { scoreArticle } from '../scoring/score'
+import { buildStructuredEvidence } from './article-evidence'
+import { cacheManagedArticleImage, managedArticleImagesConfigured } from './article-image'
 import { buildArticleMetadata } from './article-metadata'
 import { clusterAndPublish } from './cluster'
 import { extractArticleText } from './extract'
@@ -31,6 +33,10 @@ export type IngestStats = {
   inserted: number
   skippedDuplicate: number
   skippedIrrelevant: number
+  evidenceGenerated: number
+  evidenceFallback: number
+  imagesCached: number
+  imagesFallback: number
   sourcesFailed: string[]
 }
 
@@ -110,6 +116,15 @@ async function ingestSource(source: Source, stats: IngestStats) {
       }
 
       const extracted = await extractArticleText(item, rights)
+      const evidence = await buildStructuredEvidence({
+        title: item.title,
+        source: source.name,
+        categories: item.categories,
+        analysisText: extracted.analysisText,
+        extractionMethod: extracted.analysisMethod,
+      })
+      if (evidence.generatedBy === 'openai') stats.evidenceGenerated++
+      else stats.evidenceFallback++
       const metadata = buildArticleMetadata(item.title, source.name, item.categories)
       const analysisText = [
         extracted.analysisText,
@@ -135,12 +150,25 @@ async function ingestSource(source: Source, stats: IngestStats) {
         continue
       }
 
-      const topic = await matchTopic(metadata.searchText)
+      const topic = await matchTopic(evidence.searchText || metadata.searchText)
       const leanSignals = [
         ...score.lean_signals,
         `rights:${rights.analysis}`,
+        `evidence:${evidence.generatedBy}`,
+        `extraction:${extracted.analysisMethod}`,
         `policy:${RIGHTS_POLICY_VERSION}`,
       ]
+      const sourceImage = extracted.imageUrl
+      const requestedImageMode = sourceImage ? rights.image : 'none'
+      const cacheConfigured =
+        requestedImageMode === 'managed_thumbnail' && managedArticleImagesConfigured()
+      const initialImageMode =
+        requestedImageMode === 'managed_thumbnail' && !cacheConfigured
+          ? 'remote_no_cache'
+          : requestedImageMode
+      const initialMediaStatus = sourceImage
+        ? cacheConfigured ? 'pending' : 'ready'
+        : 'none'
 
       const inserted = await dbQuery(
         `INSERT INTO articles
@@ -149,25 +177,106 @@ async function ingestSource(source: Source, stats: IngestStats) {
             content_type, lean_signals, source_lean, scorer_version,
             general_topic_id, hashtags, entities, event_terms, search_text,
             text_mode, image_mode, ai_mode, rights_policy_version,
-            published_at, status)
+            media_source_url, media_status, published_at, status)
          VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
-           $19,$20,$21,$22,$23,$24,'ready'
+           $19,$20,$21,$22,$23,$24,$25,$26,'ready'
          )
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
         [
           item.url, contentHash, item.title, source.name,
-          extracted.analysisText || null, extracted.publicDescription, extracted.imageUrl,
+          null, extracted.publicDescription, sourceImage,
           score.political_lean, politicalRelevance, score.lean_confidence,
           score.content_type, leanSignals, source.lean, score.scorer_version,
-          topic.generalTopicId, metadata.hashtags, metadata.entities,
-          metadata.eventTerms, metadata.searchText,
-          rights.publicText, rights.image, rights.ai, RIGHTS_POLICY_VERSION,
-          extracted.publishedAt,
+          topic.generalTopicId, metadata.hashtags, evidence.entities,
+          evidence.eventTerms, evidence.searchText,
+          rights.publicText, initialImageMode, rights.ai, RIGHTS_POLICY_VERSION,
+          sourceImage, initialMediaStatus, extracted.publishedAt,
         ]
       )
-      stats.inserted += inserted.rowCount ?? 0
-      await sleep(25)
+      const articleId = inserted.rows[0]?.id as string | undefined
+      if (!articleId) continue
+      stats.inserted++
+
+      await dbQuery(
+        `INSERT INTO article_evidence
+           (article_id, extraction_version, source_text_hash, word_count,
+            evidence_summary, claims, timeline, relationships, disputed_points,
+            entities, event_terms, search_text, extraction_method, confidence,
+            generated_by)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,
+                 $10,$11,$12,$13,$14,$15)
+         ON CONFLICT (article_id) DO UPDATE SET
+           extraction_version = EXCLUDED.extraction_version,
+           source_text_hash = EXCLUDED.source_text_hash,
+           word_count = EXCLUDED.word_count,
+           evidence_summary = EXCLUDED.evidence_summary,
+           claims = EXCLUDED.claims,
+           timeline = EXCLUDED.timeline,
+           relationships = EXCLUDED.relationships,
+           disputed_points = EXCLUDED.disputed_points,
+           entities = EXCLUDED.entities,
+           event_terms = EXCLUDED.event_terms,
+           search_text = EXCLUDED.search_text,
+           extraction_method = EXCLUDED.extraction_method,
+           confidence = EXCLUDED.confidence,
+           generated_by = EXCLUDED.generated_by,
+           updated_at = NOW()`,
+        [
+          articleId,
+          evidence.extractionVersion,
+          evidence.sourceTextHash,
+          evidence.wordCount,
+          evidence.summary,
+          JSON.stringify(evidence.claims),
+          JSON.stringify(evidence.timeline),
+          JSON.stringify(evidence.relationships),
+          JSON.stringify(evidence.disputedPoints),
+          evidence.entities,
+          evidence.eventTerms,
+          evidence.searchText,
+          evidence.extractionMethod,
+          evidence.confidence,
+          evidence.generatedBy,
+        ]
+      )
+
+      if (sourceImage && requestedImageMode === 'managed_thumbnail') {
+        const cached = await cacheManagedArticleImage(articleId, sourceImage)
+        if (cached) {
+          stats.imagesCached++
+          await dbQuery(
+            `UPDATE articles
+             SET media = $2, media_thumbnail_url = $3, media_large_url = $2,
+                 media_width = $4, media_height = $5, media_source_hash = $6,
+                 media_status = 'ready', media_cached_at = NOW(),
+                 media_expires_at = $7, media_error = NULL,
+                 image_mode = 'managed_thumbnail'
+             WHERE id = $1`,
+            [
+              articleId,
+              cached.largeUrl,
+              cached.thumbnailUrl,
+              cached.width,
+              cached.height,
+              cached.sourceHash,
+              cached.expiresAt,
+            ]
+          )
+        } else {
+          stats.imagesFallback++
+          await dbQuery(
+            `UPDATE articles
+             SET media = media_source_url, image_mode = 'remote_no_cache',
+                 media_status = CASE WHEN media_source_url IS NULL THEN 'none' ELSE 'failed' END,
+                 media_error = 'managed thumbnail unavailable'
+             WHERE id = $1`,
+            [articleId]
+          )
+        }
+      }
+      await sleep(extracted.usedFullPage ? 250 : 25)
     }
   }
   if (hadFeedFailure && !stats.sourcesFailed.includes(source.name)) {
@@ -179,6 +288,8 @@ export async function runIngest(): Promise<IngestStats> {
   const stats: IngestStats = {
     feedsOk: 0, feedsFailed: 0, seen: 0,
     inserted: 0, skippedDuplicate: 0, skippedIrrelevant: 0,
+    evidenceGenerated: 0, evidenceFallback: 0,
+    imagesCached: 0, imagesFallback: 0,
     sourcesFailed: [],
   }
   const started = Date.now()
@@ -225,7 +336,9 @@ export async function runIngest(): Promise<IngestStats> {
       `UPDATE ingest_runs
        SET status = $2, feeds_ok = $3, feeds_failed = $4, sources_failed = $5,
            seen = $6, inserted = $7, skipped_duplicate = $8,
-           skipped_irrelevant = $9, completed_at = NOW(), duration_ms = $10
+           skipped_irrelevant = $9, evidence_generated = $10,
+           evidence_fallback = $11, images_cached = $12,
+           images_fallback = $13, completed_at = NOW(), duration_ms = $14
        WHERE id = $1`,
       [
         runId,
@@ -237,6 +350,10 @@ export async function runIngest(): Promise<IngestStats> {
         stats.inserted,
         stats.skippedDuplicate,
         stats.skippedIrrelevant,
+        stats.evidenceGenerated,
+        stats.evidenceFallback,
+        stats.imagesCached,
+        stats.imagesFallback,
         duration,
       ]
     )
@@ -244,7 +361,8 @@ export async function runIngest(): Promise<IngestStats> {
     console.log(
       `[ingest] done in ${Math.round(duration / 1000)}s — ` +
         `${stats.inserted} inserted, ${stats.skippedDuplicate} duplicate, ` +
-        `${stats.skippedIrrelevant} irrelevant, ${stats.feedsFailed} feed(s) failed`
+        `${stats.skippedIrrelevant} irrelevant, ${stats.evidenceGenerated} AI evidence, ` +
+        `${stats.imagesCached} images cached, ${stats.feedsFailed} feed(s) failed`
     )
 
     for (const source of stats.sourcesFailed) {
@@ -281,7 +399,9 @@ export async function runIngest(): Promise<IngestStats> {
          SET status = 'failed', error = $2, completed_at = NOW(), duration_ms = $3,
              feeds_ok = $4, feeds_failed = $5, sources_failed = $6,
              seen = $7, inserted = $8, skipped_duplicate = $9,
-             skipped_irrelevant = $10
+             skipped_irrelevant = $10, evidence_generated = $11,
+             evidence_fallback = $12, images_cached = $13,
+             images_fallback = $14
          WHERE id = $1`,
         [
           runId,
@@ -294,6 +414,10 @@ export async function runIngest(): Promise<IngestStats> {
           stats.inserted,
           stats.skippedDuplicate,
           stats.skippedIrrelevant,
+          stats.evidenceGenerated,
+          stats.evidenceFallback,
+          stats.imagesCached,
+          stats.imagesFallback,
         ]
       ).catch(() => {})
     }

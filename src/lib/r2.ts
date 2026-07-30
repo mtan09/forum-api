@@ -35,6 +35,27 @@ export function feedbackStorageConfigured() {
   return configured(process.env.R2_FEEDBACK_BUCKET_NAME)
 }
 
+export async function putPublicObject(
+  key: string,
+  body: Buffer,
+  contentType: string,
+  cacheControl = 'public, max-age=31536000, immutable'
+) {
+  if (!publicStorageConfigured()) throw new Error('Public R2 storage is not configured')
+  await r2Client().send(
+    new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME!,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      CacheControl: cacheControl,
+    })
+  )
+  const publicBase = process.env.R2_PUBLIC_URL?.replace(/\/$/, '')
+  if (!publicBase) throw new Error('R2_PUBLIC_URL is not configured')
+  return `${publicBase}/${key}`
+}
+
 export async function putFeedbackObject(key: string, body: Buffer, contentType: string) {
   if (!feedbackStorageConfigured()) throw new Error('Private feedback storage is not configured')
   await r2Client().send(

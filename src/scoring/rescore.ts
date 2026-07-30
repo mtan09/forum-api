@@ -31,7 +31,12 @@ async function rescoreArticles(): Promise<number> {
       [
         a.id, score.political_lean, score.political_relevance,
         score.lean_confidence, score.content_type,
-        [...score.lean_signals, 'rights:metadata_only', `policy:${RIGHTS_POLICY_VERSION}`],
+        [
+          ...score.lean_signals,
+          'rights:structured_evidence',
+          'rescore:evidence',
+          `policy:${RIGHTS_POLICY_VERSION}`,
+        ],
         sourcePrior(a.source) ?? null, score.scorer_version,
       ]
     )

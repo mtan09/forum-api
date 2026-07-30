@@ -15,9 +15,23 @@ export function publicArticleFields(alias = 'a'): string {
       ELSE NULL
     END AS description,
     CASE
-      WHEN ${a}.image_mode IN ('remote_no_cache', 'licensed_cache') THEN ${a}.media
+      WHEN ${a}.image_mode = 'managed_thumbnail'
+        THEN COALESCE(${a}.media_large_url, ${a}.media_thumbnail_url, ${a}.media_source_url)
+      WHEN ${a}.image_mode IN ('remote_no_cache', 'licensed_cache')
+        THEN COALESCE(${a}.media, ${a}.media_source_url)
       ELSE NULL
     END AS media,
+    CASE
+      WHEN ${a}.image_mode = 'managed_thumbnail' THEN ${a}.media_thumbnail_url
+      ELSE NULL
+    END AS media_thumbnail_url,
+    CASE
+      WHEN ${a}.image_mode = 'managed_thumbnail' THEN ${a}.media_large_url
+      ELSE NULL
+    END AS media_large_url,
+    ${a}.media_width,
+    ${a}.media_height,
+    ${a}.media_status,
     ${a}.image_mode,
     ${a}.text_mode,
     ${a}.ai_mode,

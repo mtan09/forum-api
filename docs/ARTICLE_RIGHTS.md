@@ -1,13 +1,13 @@
-# Article rights and metadata policy
+# Article processing, provenance, and media policy
 
-forum is a link-and-context product. Publisher access is controlled separately
-for discovery, text analysis, public display, AI grounding, and images.
-Availability through RSS or HTML is never treated as a blanket reuse license.
+forum is a social news-context product. It attributes and links publisher
+reporting, uses transient analysis to organize coverage, and does not provide a
+replacement full-article reader.
 
-The executable registry is
-[`src/ingest/source-rights.ts`](../src/ingest/source-rights.ts). It records a
-review date, policy status, terms URL, note, and the active modes for every
-curated publisher. A missing source is denied by default.
+The executable source registry is
+[`src/ingest/source-rights.ts`](../src/ingest/source-rights.ts). It records the
+publisher-policy review status and terms note separately from the runtime
+acquisition, public-text, internal-analysis, forumAI, and image modes.
 
 ## Runtime modes
 
@@ -15,62 +15,123 @@ curated publisher. A missing source is denied by default.
 |---|---|
 | Acquisition | `feed_metadata`, `feed_text`, `full_page`, `disabled` |
 | Public text | `headline_only`, `feed_description`, `full_text` |
-| Internal analysis | `metadata_only`, `permitted_text` |
-| forumAI | `metadata_only`, `permitted_text`, `denied` |
-| Images | `none`, `remote_no_cache`, `licensed_cache` |
+| Internal analysis | `metadata_only`, `feed_text_transient`, `full_page_transient` |
+| forumAI | `metadata_only`, `structured_evidence`, `permitted_text`, `denied` |
+| Images | `none`, `remote_no_cache`, `managed_thumbnail`, `licensed_cache` |
 
-The initial policy keeps all publishers at headline/link metadata. It does not
-enable article-page extraction or publisher images. Conditional policies are
-documented expansion paths, not active grants.
+Curated sources currently use `full_page_transient`,
+`structured_evidence`, and `managed_thumbnail`, with the publisher remaining
+the destination for the complete article. A missing registry entry is
+metadata-only with a remote-preview fallback.
 
-## Invariants
+## Text-processing boundary
 
-- Ingestion consults policy before reading optional feed fields.
-- There is no article-page extraction dependency.
-- Public article projections never select `articles.content`.
-- Legacy summaries are hidden unless they carry the current policy version.
-- forumAI receives headline/source/date/event metadata unless `ai_mode`
-  explicitly permits additional text.
-- Article media is returned only for an approved image mode.
-- `remote_no_cache` images must not be written to device disk caches.
-- The mobile client independently rejects media whose policy mode is absent.
-- Policy changes require a terms/license review, an updated note and date, a
-  policy-version bump, and tests.
+The pre-conservative extractor behavior was restored selectively from Git
+commit `29b905f`:
 
-## Database rollout
+1. Prefer a substantial RSS body.
+2. Otherwise fetch the publisher page with a 15-second timeout and readability
+   extraction.
+3. Reject obvious video-playlist chrome.
+4. Use the transient text for deterministic political relevance, lean,
+   content-type scoring, topic matching, and evidence extraction.
+5. Persist compact structured evidence, then release the text.
 
-The safe order is:
+`articles.content` is always `NULL` for the current policy version. Raw text
+must never be written to Postgres, R2, logs, Sentry, analytics, public/admin
+responses, or forumAI prompts after ingestion. `article_evidence` stores only:
+
+- a one-way source-text hash and word count;
+- an original short evidence summary;
+- attributed claims, timeline facts, entity relationships, and disputed points;
+- entities, event terms, search text, extraction method, confidence, and
+  generator/version metadata.
+
+OpenAI evidence extraction is optional and daily-capped. Missing credentials,
+cap exhaustion, malformed model output, or provider failure produces
+deterministic metadata evidence and does not drop the article.
+
+## Image boundary
+
+The extractor restores feed-image-first/page-image-fallback selection and keeps
+the source-independent malformed URL guard that fixed The Hill's encoded
+caption failures.
+
+`managed_thumbnail`:
+
+- downloads at most 15 MB with a 12-second timeout;
+- requires an image content type and successful Sharp decoding;
+- rotates correctly and strips source metadata;
+- stores only 640px and 1280px WebP variants under
+  `articles/<article-id>/...`;
+- records the publisher image URL, source hash, original dimensions, cache
+  time, expiry, and status;
+- falls back to `remote_no_cache` when download, decoding, R2, or configuration
+  fails.
+
+The client disk-caches only managed/licensed variants. Remote fallbacks use no
+disk cache. Summary carousels label the publisher and open the associated
+publisher URL. `npm run expire:article-images` is dry-run by default; an admin
+can also purge one article immediately through
+`POST /admin/articles/:id/purge-media`.
+
+## Feature flags and cost controls
+
+```dotenv
+ARTICLE_TRANSIENT_ANALYSIS_ENABLED=true
+ARTICLE_STRUCTURED_EVIDENCE_ENABLED=true
+ARTICLE_ANALYSIS_MODEL=gpt-5.4-nano
+ARTICLE_ANALYSIS_DAILY_LIMIT=500
+ARTICLE_MANAGED_IMAGES_ENABLED=true
+ARTICLE_IMAGE_CACHE_DAYS=30
+```
+
+Turning off transient analysis keeps ingestion alive with metadata evidence.
+Turning off managed images preserves remote previews. The ingest run records
+AI-evidence/fallback and managed-image/fallback totals for monitoring.
+
+## Staged database rollout
+
+Migration 018 is additive except for expanding existing mode constraints.
+Validate code and migration before processing old rows:
 
 ```bash
-npm run migrate:rights
-npm run backfill:article-metadata
-npm run verify:rights
+npm run migrate:article-analysis
+npm run verify:article-analysis
+npm run backfill:article-evidence
+```
+
+The backfill command is a read-only preview unless explicitly enabled:
+
+```bash
+ARTICLE_BACKFILL_LIMIT=50 \
+APPLY_ARTICLE_ANALYSIS_BACKFILL=true \
+npm run backfill:article-evidence
+```
+
+Run small recent-first batches. Each successful row writes evidence and managed
+media in a transaction, sets `articles.content` to `NULL`, and moves the row to
+the current policy. Then:
+
+```bash
+npm run verify:article-analysis
 npm run rescore
 npm run cluster
-npm run audit:article-cleanup
 ```
 
-Migration 017 is non-destructive. The audit prints the exact legacy-body and
-media impact without changing data. Permanent cleanup requires an explicit
-operator action:
+Image expiry is also dry-run first:
 
 ```bash
-npm run cleanup:articles
+npm run expire:article-images
+APPLY_ARTICLE_IMAGE_EXPIRY=true npm run expire:article-images
 ```
 
-Never run cleanup before the migrated API, metadata backfill, new cluster
-summaries, search, and app fallbacks have been verified.
+Do not run the older blanket cleanup before evidence coverage and regenerated
+clusters are verified.
 
-## Adding or licensing a source
+## Review and source changes
 
-Before broadening any mode, retain written evidence that covers the exact use:
-
-- headline and description display;
-- internal classification and clustering;
-- AI grounding and downstream processors;
-- image display, proxying, and caching;
-- retention period, attribution, platforms, territories, and termination.
-
-Photograph permission is reviewed independently from article text. A publisher
-feed image may be owned by a photographer or wire agency and is not enabled
-merely because the image URL is present.
+Changing a source still requires an updated review date, terms URL/note,
+policy-version bump, and tests. Keep publisher text, image, AI-processing, and
+cache decisions separate. The status is a risk record; do not describe a
+conservative engineering choice as an Apple App Store requirement.

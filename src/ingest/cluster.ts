@@ -41,6 +41,9 @@ export type ArticleRow = {
   image_mode: string
   entities: string[]
   event_terms: string[]
+  evidence_summary?: string | null
+  evidence_search_text?: string | null
+  claims?: Array<{ claim?: string; attribution?: string; confidence?: number }>
 }
 
 type Cluster = {
@@ -57,9 +60,10 @@ function truncateAtWord(text: string, maxChars: number): string {
   return `${cut.trimEnd()}…`
 }
 
-// Summaries may quote a source's headline, but never its stored article body.
+// Prefer forum-original structured evidence; fall back to the attributed
+// headline when extraction was unavailable.
 export function leadOf(article: ArticleRow, maxChars = 260): string {
-  return truncateAtWord(article.title, maxChars)
+  return truncateAtWord(article.evidence_summary || article.title, maxChars)
 }
 
 const centrality = (a: ArticleRow) => Math.abs((a.source_lean ?? 0.5) - 0.5)
@@ -155,14 +159,22 @@ function mergedProfile(profiles: Keywords[]): Keywords {
 
 export async function clusterAndPublish(): Promise<{ clusters: number; hot: string[] }> {
   const { rows: articles } = await query(
-    `SELECT id, title, description, source, source_lean, political_lean,
-            general_topic_id, published_at, created_at,
-            CASE WHEN image_mode IN ('remote_no_cache', 'licensed_cache') THEN media ELSE NULL END AS media,
-            image_mode, entities, event_terms
-     FROM articles
-     WHERE title IS NOT NULL AND scorer_version IS NOT NULL AND status = 'ready'
-       AND created_at > NOW() - INTERVAL '${RECENT_DAYS} days'
-     ORDER BY created_at DESC, id`
+    `SELECT a.id, a.title, a.description, a.source, a.source_lean, a.political_lean,
+            a.general_topic_id, a.published_at, a.created_at,
+            CASE
+              WHEN a.image_mode = 'managed_thumbnail'
+                THEN COALESCE(a.media_large_url, a.media_thumbnail_url, a.media_source_url)
+              WHEN a.image_mode IN ('remote_no_cache', 'licensed_cache')
+                THEN COALESCE(a.media, a.media_source_url)
+              ELSE NULL
+            END AS media,
+            a.image_mode, a.entities, a.event_terms,
+            e.evidence_summary, e.search_text AS evidence_search_text, e.claims
+     FROM articles a
+     LEFT JOIN article_evidence e ON e.article_id = a.id
+     WHERE a.title IS NOT NULL AND a.scorer_version IS NOT NULL AND a.status = 'ready'
+       AND a.created_at > NOW() - INTERVAL '${RECENT_DAYS} days'
+     ORDER BY a.created_at DESC, a.id`
   )
 
   // Greedy leader clustering: newest article founds a cluster; each next
@@ -174,7 +186,10 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
     const profile = metadataKeywordProfile(
       article.title,
       article.entities ?? [],
-      article.event_terms ?? []
+      article.event_terms ?? [],
+      [article.evidence_search_text ?? '', article.evidence_summary ?? '']
+        .filter(Boolean)
+        .join(' ')
     )
     let best: Cluster | null = null
     let bestSim = 0

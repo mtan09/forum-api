@@ -30,15 +30,13 @@ async function main() {
           metadata.hashtags,
           metadata.searchText,
           rights.publicText,
-          rights.image,
-          rights.ai,
           RIGHTS_POLICY_VERSION
         )
-        const p = index * 9
+        const p = index * 7
         return `(
           $${p + 1}::uuid, $${p + 2}::text[], $${p + 3}::text[],
           $${p + 4}::text[], $${p + 5}::text, $${p + 6}::text,
-          $${p + 7}::text, $${p + 8}::text, $${p + 9}::text
+          $${p + 7}::text
         )`
       })
       await client.query(
@@ -48,12 +46,12 @@ async function main() {
              hashtags = value.hashtags,
              search_text = value.search_text,
              text_mode = value.text_mode,
-             image_mode = value.image_mode,
-             ai_mode = value.ai_mode,
+             image_mode = CASE WHEN article.media IS NULL THEN 'none' ELSE 'remote_no_cache' END,
+             ai_mode = 'metadata_only',
              rights_policy_version = value.rights_policy_version
          FROM (VALUES ${values.join(',')}) AS value(
            id, entities, event_terms, hashtags, search_text,
-           text_mode, image_mode, ai_mode, rights_policy_version
+           text_mode, rights_policy_version
          )
          WHERE article.id = value.id`,
         params

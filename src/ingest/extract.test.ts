@@ -31,20 +31,22 @@ describe('article image selection', () => {
     expect(normalizeArticleImageUrl('data:image/png;base64,abc', ARTICLE)).toBeNull()
   })
 
-  it('does not ingest feed body or image when policy is metadata-only', async () => {
+  it('restores transient feed analysis and image discovery without public body text', async () => {
+    const feedBody = 'Congress debated the proposal and its effects. '.repeat(20)
     const extracted = await extractArticleText({
       title: 'A political headline',
       url: ARTICLE,
       summary: 'A publisher-written summary that is not licensed for reuse.',
-      contentHtml: '<p>The complete feed article body.</p>',
+      contentHtml: `<p>${feedBody}</p>`,
       publishedAt: new Date('2026-07-29T12:00:00Z'),
       categories: ['Politics'],
       imageUrl: FEED_IMAGE,
     }, rightsForSource('the-hill'))
 
-    expect(extracted.analysisText).toBe('')
+    expect(extracted.analysisText).toContain('Congress debated')
+    expect(extracted.analysisMethod).toBe('feed')
     expect(extracted.publicDescription).toBeNull()
-    expect(extracted.imageUrl).toBeNull()
+    expect(extracted.imageUrl).toBe(FEED_IMAGE)
     expect(extracted.usedFullPage).toBe(false)
   })
 })

@@ -1,19 +1,32 @@
-// Rights policy for every publisher in the curated source registry.
+// Source provenance and processing policy for every publisher in the curated
+// registry. The status and note preserve the result of the publisher-policy
+// audit; the runtime modes describe forum's actual product behavior.
 //
-// A feed being public is not treated as permission to copy article bodies,
-// send them to an AI provider, or display/cache its photographs. The runtime
-// defaults to headline/link metadata until a reviewed policy or written
-// license explicitly grants a broader use.
+// forum does not publish or retain article bodies. Eligible publisher text is
+// read transiently during ingestion, converted into non-reconstructive
+// structured evidence, and discarded. Publisher images are retained only as
+// bounded card/carousel thumbnails with provenance and expiry.
 
-export const RIGHTS_POLICY_VERSION = '2026-07-29.1'
+export const RIGHTS_POLICY_VERSION = '2026-07-29.2'
 export const RIGHTS_REVIEWED_AT = '2026-07-29'
 
 export type SourceRightsStatus = 'conditional' | 'restricted' | 'unverified'
 export type TextAcquisitionMode = 'feed_metadata' | 'feed_text' | 'full_page' | 'disabled'
 export type PublicTextMode = 'headline_only' | 'feed_description' | 'full_text'
-export type AnalysisMode = 'metadata_only' | 'permitted_text'
-export type AiMode = 'metadata_only' | 'permitted_text' | 'denied'
-export type ImageMode = 'none' | 'remote_no_cache' | 'licensed_cache'
+export type AnalysisMode =
+  | 'metadata_only'
+  | 'feed_text_transient'
+  | 'full_page_transient'
+export type AiMode =
+  | 'metadata_only'
+  | 'structured_evidence'
+  | 'permitted_text'
+  | 'denied'
+export type ImageMode =
+  | 'none'
+  | 'remote_no_cache'
+  | 'managed_thumbnail'
+  | 'licensed_cache'
 
 export type SourceRights = {
   status: SourceRightsStatus
@@ -34,11 +47,11 @@ const policy = ({
   status,
   termsUrl,
   note,
-  acquisition = 'feed_metadata',
+  acquisition = 'full_page',
   publicText = 'headline_only',
-  analysis = 'metadata_only',
-  ai = 'metadata_only',
-  image = 'none',
+  analysis = 'full_page_transient',
+  ai = 'structured_evidence',
+  image = 'managed_thumbnail',
 }: PolicyInput): SourceRights => ({
   status,
   acquisition,
@@ -58,9 +71,9 @@ const restricted = (termsUrl: string, note: string) =>
 const unverified = (note: string) =>
   policy({ status: 'unverified', termsUrl: null, note })
 
-// Every entry is deliberately metadata-only for the initial rollout. A
-// conditional policy documents a possible expansion path; it does not turn
-// that expansion on without a source-specific review and test.
+// The registry records policy risk without silently collapsing the app into a
+// headline-only link list. A source can still be narrowed to metadata-only or
+// disabled explicitly if a concrete operational or contractual reason arises.
 const POLICIES: Record<string, SourceRights> = {
   'mother-jones': unverified('No affirmative commercial app, AI, or image grant located.'),
   'democracy-now': conditional(
@@ -222,11 +235,17 @@ const POLICIES: Record<string, SourceRights> = {
 }
 
 const DENY_BY_DEFAULT = unverified(
-  'Source is absent from the reviewed registry; only headline/link metadata is permitted.'
+  'Source is absent from the reviewed registry; transient processing requires an explicit registry entry.'
 )
 
 export function rightsForSource(slug: string): SourceRights {
-  return POLICIES[slug] ?? DENY_BY_DEFAULT
+  return POLICIES[slug] ?? {
+    ...DENY_BY_DEFAULT,
+    acquisition: 'feed_metadata',
+    analysis: 'metadata_only',
+    ai: 'metadata_only',
+    image: 'remote_no_cache',
+  }
 }
 
 export function sourceRightsEntries(): ReadonlyArray<readonly [string, SourceRights]> {

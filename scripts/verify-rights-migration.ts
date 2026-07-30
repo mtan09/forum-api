@@ -32,7 +32,8 @@ async function main() {
        count(*) FILTER (WHERE rights_policy_version = $1)::int AS current_policy,
        count(*) FILTER (WHERE search_text <> '')::int AS searchable,
        count(*) FILTER (WHERE image_mode <> 'none')::int AS image_enabled,
-       count(*) FILTER (WHERE ai_mode = 'permitted_text')::int AS ai_text_enabled
+       count(*) FILTER (WHERE ai_mode IN ('structured_evidence', 'permitted_text'))::int
+         AS ai_evidence_enabled
      FROM articles`,
     [RIGHTS_POLICY_VERSION]
   )

@@ -8,8 +8,10 @@ describe('public article projection', () => {
     expect(projection).toContain('article.description')
   })
 
-  it('masks media unless the row records an approved image mode', () => {
+  it('supports managed thumbnails and remote fallback without exposing disabled media', () => {
     const projection = publicArticleFields('article')
+    expect(projection).toContain("image_mode = 'managed_thumbnail'")
     expect(projection).toContain("image_mode IN ('remote_no_cache', 'licensed_cache')")
+    expect(projection).toContain('article.media_thumbnail_url')
   })
 })
