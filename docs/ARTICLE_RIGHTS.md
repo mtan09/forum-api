@@ -33,9 +33,11 @@ commit `29b905f`:
 2. Otherwise fetch the publisher page with a 15-second timeout and readability
    extraction.
 3. Reject obvious video-playlist chrome.
-4. Use the transient text for deterministic political relevance, lean,
-   content-type scoring, topic matching, and evidence extraction.
-5. Persist compact structured evidence, then release the text.
+4. Use the transient text for the cheap deterministic political-relevance
+   gate; rejected items never spend an evidence-model request or image-cache
+   write.
+5. Score relevant items for lean/content type and extract structured evidence.
+6. Persist compact structured evidence, then release the text.
 
 `articles.content` is always `NULL` for the current policy version. Raw text
 must never be written to Postgres, R2, logs, Sentry, analytics, public/admin

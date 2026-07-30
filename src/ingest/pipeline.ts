@@ -116,15 +116,6 @@ async function ingestSource(source: Source, stats: IngestStats) {
       }
 
       const extracted = await extractArticleText(item, rights)
-      const evidence = await buildStructuredEvidence({
-        title: item.title,
-        source: source.name,
-        categories: item.categories,
-        analysisText: extracted.analysisText,
-        extractionMethod: extracted.analysisMethod,
-      })
-      if (evidence.generatedBy === 'openai') stats.evidenceGenerated++
-      else stats.evidenceFallback++
       const metadata = buildArticleMetadata(item.title, source.name, item.categories)
       const analysisText = [
         extracted.analysisText,
@@ -150,6 +141,17 @@ async function ingestSource(source: Source, stats: IngestStats) {
         continue
       }
 
+      // Evidence generation may call a metered model, so the cheap,
+      // deterministic relevance gate must run first.
+      const evidence = await buildStructuredEvidence({
+        title: item.title,
+        source: source.name,
+        categories: item.categories,
+        analysisText: extracted.analysisText,
+        extractionMethod: extracted.analysisMethod,
+      })
+      if (evidence.generatedBy === 'openai') stats.evidenceGenerated++
+      else stats.evidenceFallback++
       const topic = await matchTopic(evidence.searchText || metadata.searchText)
       const leanSignals = [
         ...score.lean_signals,
