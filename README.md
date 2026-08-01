@@ -142,7 +142,7 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 revokes the documented demo login while retaining its authored content; migration 017 adds explicit AI consent evidence and durable Expo push receipts.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.

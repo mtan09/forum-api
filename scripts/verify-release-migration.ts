@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import pool from '../src/db'
+import { verifyPassword } from '../src/lib/auth'
 
 async function main() {
   const schema = await pool.query(
@@ -22,6 +23,7 @@ async function main() {
   const john = await pool.query(
     `SELECT
        COUNT(a.user_id)::int AS credentials,
+       MAX(a.password_hash) AS password_hash,
        COALESCE(bool_or(u.is_admin), FALSE) AS is_admin
      FROM userdata u
      LEFT JOIN auth_credentials a
@@ -34,10 +36,13 @@ async function main() {
   if (failed.length > 0) {
     throw new Error(`Release schema checks failed: ${failed.map(([key]) => key).join(', ')}`)
   }
-  if (Number(john.rows[0]?.credentials ?? 0) !== 0 || john.rows[0]?.is_admin) {
-    throw new Error('The documented demo credential or admin role is still active')
+  const johnPasswordWorks = john.rows[0]?.password_hash
+    ? await verifyPassword('password123', john.rows[0].password_hash)
+    : false
+  if (Number(john.rows[0]?.credentials ?? 0) !== 1 || !johnPasswordWorks || john.rows[0]?.is_admin) {
+    throw new Error('The seeded John login is unavailable, changed, or has admin access')
   }
-  console.log('Release migration verified: schema present; demo credential revoked')
+  console.log('Release migration verified: schema present; seeded John login is non-admin')
 }
 
 main()

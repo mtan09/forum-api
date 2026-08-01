@@ -64,6 +64,33 @@ describe('private follows and notification preferences', () => {
     await expect(response.json()).resolves.toMatchObject({ follow_status: 'accepted' })
   })
 
+  it('lists accepted followers while applying block visibility', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'follower', username: 'Follower' }] })
+    const response = await app.request('/users/target/followers')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual([{ id: 'follower', username: 'Follower' }])
+    expect(mocks.query.mock.calls[1][0]).toContain("f.status = 'accepted'")
+    expect(mocks.query.mock.calls[1][0]).toContain('NOT EXISTS')
+  })
+
+  it('lists accepted accounts a user follows', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'followee', username: 'Followee' }] })
+    const response = await app.request('/users/target/following')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual([{ id: 'followee', username: 'Followee' }])
+    expect(mocks.query.mock.calls[1][0]).toContain('u.id = f.followee_id')
+  })
+
+  it('returns not found when a connection-list owner no longer exists', async () => {
+    mocks.query.mockResolvedValueOnce({ rows: [] })
+    const response = await app.request('/users/missing/followers')
+    expect(response.status).toBe(404)
+  })
+
   it('requires verified email before global email delivery is enabled', async () => {
     mocks.query.mockResolvedValueOnce({ rows: [{ email_verified: false }] })
     const response = await app.request('/users/me/notification-prefs', {

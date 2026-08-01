@@ -612,6 +612,63 @@ users.delete('/followers/:followerId', requireAuth, async (c) => {
   return c.json({ ok: true })
 })
 
+// GET /users/:id/followers · /following — accepted social connections only.
+// Blocked relationships are omitted in both directions so these lists follow
+// the same visibility boundary as feeds, requests, and public profiles.
+users.get('/:id/followers', requireAuth, async (c) => {
+  const targetId = c.req.param('id')
+  const viewerId = c.get('userId')
+  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [targetId])
+  if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
+
+  const result = await query(
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.created_at,
+            EXISTS(
+              SELECT 1 FROM follows mine
+              WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'
+            ) AS followed_by_me,
+            (SELECT mine.status FROM follows mine WHERE mine.follower_id = $2 AND mine.followee_id = u.id) AS follow_status
+     FROM follows f
+     JOIN userdata u ON u.id = f.follower_id
+     WHERE f.followee_id = $1 AND f.status = 'accepted'
+       AND NOT EXISTS(
+         SELECT 1 FROM blocks b
+         WHERE (b.blocker_id = $2 AND b.blocked_id = u.id)
+            OR (b.blocker_id = u.id AND b.blocked_id = $2)
+       )
+     ORDER BY LOWER(u.username), u.id`,
+    [targetId, viewerId]
+  )
+  return c.json(result.rows)
+})
+
+users.get('/:id/following', requireAuth, async (c) => {
+  const targetId = c.req.param('id')
+  const viewerId = c.get('userId')
+  const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [targetId])
+  if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
+
+  const result = await query(
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.created_at,
+            EXISTS(
+              SELECT 1 FROM follows mine
+              WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'
+            ) AS followed_by_me,
+            (SELECT mine.status FROM follows mine WHERE mine.follower_id = $2 AND mine.followee_id = u.id) AS follow_status
+     FROM follows f
+     JOIN userdata u ON u.id = f.followee_id
+     WHERE f.follower_id = $1 AND f.status = 'accepted'
+       AND NOT EXISTS(
+         SELECT 1 FROM blocks b
+         WHERE (b.blocker_id = $2 AND b.blocked_id = u.id)
+            OR (b.blocker_id = u.id AND b.blocked_id = $2)
+       )
+     ORDER BY LOWER(u.username), u.id`,
+    [targetId, viewerId]
+  )
+  return c.json(result.rows)
+})
+
 // GET /users/:id — public profile (+ block state, follow state, counts)
 users.get('/:id', requireAuth, async (c) => {
   const result = await query(

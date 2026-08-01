@@ -130,11 +130,10 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
 CREATE INDEX IF NOT EXISTS idx_ingest_runs_started
   ON ingest_runs (started_at DESC);
 
--- The published demo identity keeps its authored content, but its documented
--- password and admin access must not survive this production migration.
+-- Seeded personas remain usable for controlled product testing, but none of
+-- the shared-password identities should retain production admin access.
 UPDATE userdata
 SET is_admin = FALSE
 WHERE id IN (
   SELECT user_id FROM auth_credentials WHERE lower(email) = 'john@example.dev'
 );
-DELETE FROM auth_credentials WHERE lower(email) = 'john@example.dev';
