@@ -52,6 +52,7 @@ describe('deterministic moderation', () => {
     let received: unknown
     const result = await moderateImage('user', Buffer.from('image'), 'image/jpeg', {
       audit: false,
+      consentGranted: true,
       provider: async (input) => {
         received = input
         return { flagged: true, categories: ['violence/graphic'] }
@@ -59,5 +60,36 @@ describe('deterministic moderation', () => {
     })
     expect(JSON.stringify(received)).toContain('data:image/jpeg;base64,')
     expect(result.decision).toBe('reject')
+  })
+
+  it('does not call OpenAI when an authenticated user has not consented', async () => {
+    let called = false
+    const result = await moderateText('user', 'post', 'A normal political opinion.', {
+      audit: false,
+      consentGranted: false,
+      provider: async () => {
+        called = true
+        return { flagged: false, categories: [] }
+      },
+    })
+    expect(called).toBe(false)
+    expect(moderationFailure(result)).toMatchObject({
+      status: 428,
+      body: { code: 'AI_CONSENT_REQUIRED' },
+    })
+  })
+
+  it('can apply on-server rules without a provider during declined signup', async () => {
+    let called = false
+    const result = await moderateText(null, 'username', 'civil_username', {
+      audit: false,
+      useProvider: false,
+      provider: async () => {
+        called = true
+        return { flagged: false, categories: [] }
+      },
+    })
+    expect(called).toBe(false)
+    expect(result).toMatchObject({ decision: 'allow', provider: 'rules' })
   })
 })

@@ -7,7 +7,7 @@ import { logger } from 'hono/logger'
 import pool from './db'
 import { captureException, initSentry } from './lib/sentry'
 import { processDeletionJobs } from './jobs/deletion'
-import { flushEmailDigests } from './lib/push'
+import { flushEmailDigests, processPushReceipts } from './lib/push'
 
 initSentry()
 
@@ -84,10 +84,11 @@ serve({ fetch: app.fetch, port }, () => {
   console.log(`forum-api running on port ${port}`)
 })
 
-// Small durable-job pump for email coalescing and account-media cleanup.
+// Small durable-job pump for email coalescing, push delivery receipts, and
+// account-media cleanup.
 // News ingestion intentionally does not run here; Railway owns that schedule.
 const runBackgroundJobs = () =>
-  Promise.all([processDeletionJobs(), flushEmailDigests()]).catch((err) => {
+  Promise.all([processDeletionJobs(), flushEmailDigests(), processPushReceipts()]).catch((err) => {
     console.error('[jobs] background run failed:', err)
     captureException(err, { component: 'background-jobs' })
   })

@@ -34,10 +34,10 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
 - **User spectrum (`/users/:id/spectrum`)** is computed from activity, never self-declared: each scored post contributes its position at weight 3, each upvote contributes the voted content's lean at weight 1, each downvote the *mirror* of that lean. Votes on one's own posts are excluded. `/users/me/spectrum/history` replays the same math at each recent month-end for the profile trajectory sparkline.
 - **The Floor (`/debates`)** auto-picks up to 6 daily rooms from the story clusters — `biggest` (top-scored), `contested` (deepest coverage from *both* wings), and `trending` fill — generated lazily and topped up per request. Users pin a position (`POST /debates/:id/vote`), which unlocks a 10-bin distribution + median and a shared thread. `GET /debates/recap` returns yesterday's rooms with their final numbers. The Floor's "day" is anchored to `America/New_York` so UTC rollover doesn't blank the evening's rooms.
-- **Pre-publication moderation** — posts, comments, DMs, usernames, bios, forumAI prompts, and user images pass narrow deterministic hard stops followed by `omni-moderation-latest`. Images are checked before R2 upload. Provider outage fails closed with a retryable 503; rejection uses a neutral 422. Audits retain only hashes and decision metadata, never rejected raw content. Publisher articles are excluded.
+- **Pre-publication moderation and AI consent** — forum's narrow deterministic hard stops run first. A versioned, explicit permission record is required before usernames, profiles, posts, comments, DMs, forumAI prompts, or user images are sent to OpenAI's `omni-moderation-latest`; existing users are not grandfathered. Declined signup usernames receive deterministic checks only, so the account can still be created. Reading, voting, saving, and following remain available after decline or withdrawal. Provider outage fails closed with a retryable 503; rejection uses a neutral 422; missing consent uses a distinct 428. Audits retain only hashes and decision metadata, never rejected raw content. Publisher articles are excluded.
 - **Reports and blocks** — `POST /reports` flags a post/article/comment/user; blocks are enforced in feeds, comments, search, follows, and DMs. Admins review reports and separately resolve flagged mock-corpus moderation records.
 - **Private accounts** — follows have pending/accepted states. Unapproved visitors see basic profile identity and spectrum but not collected Posts/Comments/Upvoted/Saved history; individually encountered content remains eligible for feeds, search, and threads. Blocking removes follow relationships.
-- **Notifications** — Push and Email preferences exist per replies/upvotes/DMs/follows. Email delivery is globally opt-in and requires a verified address; replies and DMs send immediately and upvotes coalesce per post.
+- **Notifications** — Push and Email preferences exist per replies/upvotes/DMs/follows. Email delivery is globally opt-in and requires a verified address; replies and DMs send immediately and upvotes coalesce per post. Successful Expo ticket IDs are persisted, their APNs/FCM receipts are checked after the recommended delay, and dead device tokens are removed.
 - **Hardening** — every authenticated request re-resolves the user, so deleted or banned accounts invalidate old JWTs immediately. Sliding-window rate limits protect sensitive routes, uploads are re-encoded with EXIF stripped, Sentry redacts PII/tokens, and `/health` checks Postgres.
 - **Deletion and feedback** — account deletion transactionally enqueues public/private R2 cleanup with retries and a 24-hour alert. Structured beta feedback stores device/build context and optional screenshots in a separate private bucket; only admins receive short-lived signed URLs.
 - **Reliable ingestion** — a Postgres advisory lock prevents overlap, database and per-source failures retry independently, clustering remains in the successful flow, and `ingest_runs` records totals, failures, duration, and freshness.
@@ -70,12 +70,13 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `POST /auth/signup` `{username,email,password}` | — | Create account → `{token, user}` |
+| `POST /auth/signup` `{username,email,password,ai_consent_accepted,ai_consent_version}` | — | Create account with an explicit allow/decline AI decision → `{token, user}` |
 | `POST /auth/login` `{email,password}` | — | Log in → `{token, user}` |
 | `POST /auth/change-password` `{current_password,new_password}` | ✅ | Change password |
 | `GET /auth/verify?token=` · `POST /auth/resend-verification` | Link / ✅ | Verify email or resend the verification link |
 | `POST /auth/forgot-password` · `/reset-password` | — | Request and redeem an emailed reset code |
 | `GET /users/me` · `PATCH /users/me` · `DELETE /users/me` | ✅ | Own profile (patch: username/bio/avatar_url/header_url) / delete account |
+| `GET`/`PUT /users/me/ai-consent` | ✅ | Inspect, grant, decline, or withdraw versioned OpenAI processing permission |
 | `GET /users/me/spectrum` · `/history` | ✅ | Computed political placement + monthly trajectory |
 | `GET /users/me/posts` · `/comments` · `/upvoted` | ✅ | Own content for the profile tabs |
 | `GET /users?ids=` · `GET /users/:id` · `GET /users/:id/spectrum` | ✅ | Public profiles, follow/block state, counts, and computed spectrum |
@@ -124,18 +125,29 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 - Required: `DATABASE_URL`, a strong `JWT_SECRET`
 - forumAI: `OPENAI_API_KEY`, optional `AI_DAILY_LIMIT`
 - Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`; private feedback additionally requires `R2_FEEDBACK_BUCKET_NAME`
-- Email: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`, `LEGAL_CONTACT_EMAIL`, and `WEB_APP_URL`
+- Email/public links: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`,
+  `LEGAL_CONTACT_EMAIL`, `WEB_APP_URL`, and `PUBLIC_API_URL`
 - Observability: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`; external beta remains blocked without working Sentry
+
+The current production sender is
+`forum <accounts@updates.forumeveryside.com>`. Public support and privacy pages
+are `https://api.forumeveryside.com/support` and
+`https://api.forumeveryside.com/legal/privacy`; both contact addresses resolve
+to `support@forumeveryside.com`. The production browser client is
+`https://mtan-forum.expo.app`, which is the current `WEB_APP_URL`.
+`PUBLIC_API_URL=https://api.forumeveryside.com` ensures verification links use
+the public HTTPS origin even though Railway terminates TLS before Node.
 
 TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is removed from the parsed database URL so `pg` cannot silently reinterpret it after a driver upgrade; local hosts remain non-TLS and remote hosts use the configured TLS object.
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 revokes the documented demo login while retaining its authored content.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 revokes the documented demo login while retaining its authored content; migration 017 adds explicit AI consent evidence and durable Expo push receipts.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.
-5. Set `OPENAI_API_KEY`, an explicit `AI_DAILY_LIMIT`, and Sentry. Configure Resend only after a permanent sending domain has SPF/DKIM/DMARC.
-6. Create owner/admin and non-admin reviewer accounts with `npm run account:release`; credentials belong in a password manager/App Store Connect, never this repository.
+5. Set `OPENAI_API_KEY`, an explicit `AI_DAILY_LIMIT`, and Sentry. Production email sends from `accounts@updates.forumeveryside.com`; keep the Resend API key in Railway only and retain the verified SPF/DKIM/DMARC records in Cloudflare.
+6. Create separate owner/admin and non-admin reviewer accounts with `npm run account:release`. Use a controlled real inbox for the reviewer; `RELEASE_ACCOUNT_ROLE=reviewer` removes admin access even when updating an existing account. Credentials belong in a password manager/App Store Connect, never this repository.
+7. Treat recovery as production-ready only after a controlled account receives a six-digit reset code and completes the reset in the iOS app. A successful API response alone is intentionally non-enumerating and does not prove that Resend delivered the message.
 
 The Expo app auto-derives the API URL from the Metro dev-server host in development, so a phone on the same Wi-Fi works with zero config.

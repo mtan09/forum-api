@@ -86,4 +86,38 @@ describe('private follows and notification preferences', () => {
     expect(mocks.query.mock.calls[0][1][3]).toBe(false)
     expect(mocks.query.mock.calls[0][1][4]).toBe(true)
   })
+
+  it('reports that existing users are not silently grandfathered into AI consent', async () => {
+    mocks.query.mockResolvedValueOnce({ rows: [] })
+    const response = await app.request('/users/me/ai-consent')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      status: 'not_asked',
+      current: false,
+      consent_version: '2026-07-30',
+    })
+  })
+
+  it('records explicit current-version AI permission', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          status: 'accepted',
+          consent_version: '2026-07-30',
+          decided_at: '2026-07-30T00:00:00.000Z',
+        }],
+      })
+    const response = await app.request('/users/me/ai-consent', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accepted: true, consent_version: '2026-07-30' }),
+    })
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({
+      status: 'accepted',
+      current: true,
+    })
+    expect(mocks.query.mock.calls[0][0]).toContain('INSERT INTO ai_data_consents')
+  })
 })

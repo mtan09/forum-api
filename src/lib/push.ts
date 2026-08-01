@@ -17,7 +17,9 @@ type PushPayload = {
 }
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send'
+const EXPO_RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts'
 const CHUNK = 100
+const RECEIPT_CHUNK = 1000
 
 export function notify(userId: string, kind: NotificationKind, payload: PushPayload): void {
   deliver(userId, kind, payload).catch((err) => {
@@ -32,7 +34,7 @@ function notificationLink(payload: PushPayload): string | undefined {
   return base && path ? `${base}${path.startsWith('/') ? path : `/${path}`}` : undefined
 }
 
-async function deliver(
+export async function deliver(
   userId: string,
   kind: NotificationKind,
   payload: PushPayload
@@ -79,18 +81,30 @@ async function deliver(
       }
       // Prune tokens Expo reports as dead so we stop pushing to them
       const result = (await res.json().catch(() => null)) as {
-        data?: { status: string; details?: { error?: string } }[]
+        data?: { status: string; id?: string; details?: { error?: string } }[]
       } | null
       const batch = messages.slice(i, i + CHUNK)
-      result?.data?.forEach((ticket, idx) => {
+      const ticketWrites = result?.data?.map(async (ticket, idx) => {
         if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
-          query('DELETE FROM push_tokens WHERE token = $1', [batch[idx].to]).catch(() => {})
+          await query('DELETE FROM push_tokens WHERE token = $1', [batch[idx].to])
         } else if (ticket.status === 'error') {
           captureMessage('Expo push ticket failed', 'warning', {
             error: ticket.details?.error ?? 'unknown',
           })
+        } else if (ticket.status === 'ok' && ticket.id && batch[idx]?.to) {
+          // A successful ticket only means Expo accepted the message. Store
+          // its opaque id and check the final APNs/FCM receipt later.
+          await query(
+            `INSERT INTO push_receipts (ticket_id, token, user_id, kind)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (ticket_id) DO NOTHING`,
+            [ticket.id, batch[idx].to, userId, kind]
+          )
+        } else if (ticket.status === 'ok') {
+          captureMessage('Expo push ticket missing receipt id', 'warning', { kind })
         }
-      })
+      }) ?? []
+      await Promise.all(ticketWrites)
     }
   }
 
@@ -153,4 +167,139 @@ export async function flushEmailDigests(limit = 50): Promise<number> {
      WHERE p.user_id = d.user_id AND (NOT p.email_enabled OR NOT p.email_upvotes)`
   )
   return sent
+}
+
+type ExpoReceipt = {
+  status?: string
+  message?: string
+  details?: { error?: string }
+}
+
+export type PushReceiptRun = {
+  checked: number
+  delivered: number
+  failed: number
+  pending: number
+  tokensPruned: number
+  expired: number
+}
+
+// Expo push tickets are only the first half of delivery. Receipts contain the
+// downstream APNs/FCM result and are normally available around 15 minutes
+// later. Expo removes them after 24 hours, so stale rows are bounded too.
+export async function processPushReceipts(limit = 1000): Promise<PushReceiptRun> {
+  const expired = await query(
+    `DELETE FROM push_receipts
+     WHERE created_at < NOW() - INTERVAL '24 hours'
+     RETURNING ticket_id`
+  )
+  if (expired.rowCount) {
+    captureMessage('Expo push receipts expired before confirmation', 'warning', {
+      count: expired.rowCount,
+    })
+  }
+
+  const due = await query(
+    `SELECT ticket_id, token, kind
+     FROM push_receipts
+     WHERE next_attempt_at <= NOW()
+     ORDER BY next_attempt_at
+     LIMIT $1`,
+    [limit]
+  )
+  const stats: PushReceiptRun = {
+    checked: 0,
+    delivered: 0,
+    failed: 0,
+    pending: 0,
+    tokensPruned: 0,
+    expired: expired.rowCount ?? 0,
+  }
+
+  for (let i = 0; i < due.rows.length; i += RECEIPT_CHUNK) {
+    const batch = due.rows.slice(i, i + RECEIPT_CHUNK)
+    const ids = batch.map((row) => row.ticket_id)
+    let response: Response
+    try {
+      response = await fetch(EXPO_RECEIPTS_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      })
+    } catch (err: any) {
+      await query(
+        `UPDATE push_receipts
+         SET attempts = attempts + 1,
+             last_attempt_at = NOW(),
+             next_attempt_at = NOW() + INTERVAL '15 minutes',
+             last_error = 'receipt_request_failed'
+         WHERE ticket_id = ANY($1::text[])`,
+        [ids]
+      )
+      captureException(err, { component: 'push-receipts', batch_size: ids.length })
+      stats.pending += ids.length
+      continue
+    }
+
+    if (!response.ok) {
+      await query(
+        `UPDATE push_receipts
+         SET attempts = attempts + 1,
+             last_attempt_at = NOW(),
+             next_attempt_at = NOW() + INTERVAL '15 minutes',
+             last_error = $2
+         WHERE ticket_id = ANY($1::text[])`,
+        [ids, `http_${response.status}`]
+      )
+      captureMessage('Expo push receipt request failed', 'warning', {
+        status: response.status,
+        batch_size: ids.length,
+      })
+      stats.pending += ids.length
+      continue
+    }
+
+    const payload = (await response.json().catch(() => null)) as {
+      data?: Record<string, ExpoReceipt>
+    } | null
+    const receipts = payload?.data ?? {}
+
+    for (const row of batch) {
+      stats.checked++
+      const receipt = receipts[row.ticket_id]
+      if (!receipt) {
+        await query(
+          `UPDATE push_receipts
+           SET attempts = attempts + 1,
+               last_attempt_at = NOW(),
+               next_attempt_at = NOW() + INTERVAL '15 minutes',
+               last_error = 'receipt_not_ready'
+           WHERE ticket_id = $1`,
+          [row.ticket_id]
+        )
+        stats.pending++
+        continue
+      }
+
+      if (receipt.status === 'ok') {
+        await query('DELETE FROM push_receipts WHERE ticket_id = $1', [row.ticket_id])
+        stats.delivered++
+        continue
+      }
+
+      const error = receipt.details?.error ?? 'unknown'
+      if (error === 'DeviceNotRegistered') {
+        await query('DELETE FROM push_tokens WHERE token = $1', [row.token])
+        stats.tokensPruned++
+      }
+      await query('DELETE FROM push_receipts WHERE ticket_id = $1', [row.ticket_id])
+      captureMessage('Expo push receipt failed', 'warning', {
+        error,
+        kind: row.kind,
+      })
+      stats.failed++
+    }
+  }
+
+  return stats
 }

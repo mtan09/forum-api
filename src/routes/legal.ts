@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 // for (a hosted privacy policy) and what the in-app Settings rows open.
 const legal = new Hono()
 
-const EFFECTIVE_DATE = 'July 21, 2026'
+const EFFECTIVE_DATE = 'July 30, 2026'
 const CONTACT_EMAIL =
   process.env.LEGAL_CONTACT_EMAIL ??
   process.env.SUPPORT_EMAIL ??
@@ -44,7 +44,7 @@ legal.get('/terms', (c) =>
 <p>You own what you post. By posting you grant us a non-exclusive license to display your content inside the app (that's how a forum works). You are responsible for what you post.</p>
 
 <h2>3. Rules</h2>
-<p>Do not post: spam; harassment, threats, or bullying; hate speech; deliberate misinformation presented as fact; sexual content involving minors; illegal content; or other people's personal information. User submissions are checked before publication by narrow deterministic safety rules and OpenAI's moderation service. We may hide content, and suspend or ban accounts, that break these rules. Every piece of content has a Report action; reports are reviewed by moderators.</p>
+<p>Do not post: spam; harassment, threats, or bullying; hate speech; deliberate misinformation presented as fact; sexual content involving minors; illegal content; or other people's personal information. User submissions pass narrow safety rules operated by forum. If you explicitly allow OpenAI processing, submissions also pass OpenAI's moderation service before publication. Without that permission, features that require OpenAI safety processing remain unavailable, but browsing, voting, saving, and following continue to work. We may hide content, and suspend or ban accounts, that break these rules. Every piece of content has a Report action; reports are reviewed by moderators.</p>
 
 <h2>4. Spectrum placements</h2>
 <p>The app computes a political-lean placement for content and accounts from a deterministic, published scoring method (see the "Why this placement?" receipts on any score). Placements are estimates for discussion purposes, not statements of fact about you.</p>
@@ -81,16 +81,20 @@ legal.get('/privacy', (c) =>
 <h2>How it's used</h2>
 <ul>
   <li>To operate the product: showing your content, computing placements, delivering notifications you opted into, and sending account emails (verification, password reset).</li>
-  <li><strong>forumAI:</strong> your question, recent conversation context, and relevant article/post context are sent to OpenAI to generate the answer. They are not used by forum to build an advertising profile.</li>
-  <li><strong>Moderation:</strong> posts, comments, direct messages, usernames, bios, forumAI prompts, and uploaded images are sent to OpenAI's moderation service after narrow on-server rules. We store the decision metadata and a one-way input hash for audit, not rejected raw content.</li>
+  <li><strong>forumAI:</strong> if you explicitly allow OpenAI processing, your question, recent conversation context, and relevant article/post or news context are sent to OpenAI to generate the answer. They are not used by forum to build an advertising profile.</li>
+  <li><strong>Moderation:</strong> narrow safety rules run on forum's server first. If you explicitly allow OpenAI processing, usernames, profile text, posts, comments, direct messages, forumAI prompts, and uploaded images are also sent to OpenAI's moderation service. We store decision metadata and a one-way input hash for audit, not rejected raw content.</li>
   <li><strong>Beta quality:</strong> structured feedback and crash diagnostics help us reproduce and fix problems.</li>
 </ul>
+
+<h2>Your OpenAI choice</h2>
+<p>Before forum sends your personal data or user content to OpenAI, the app identifies OpenAI, explains the content and purposes involved, links to this policy, and asks you to allow or decline. Permission is versioned and recorded with the time of your decision. Existing users are not automatically opted in.</p>
+<p>You may choose Not now and continue browsing, voting, saving, and following. Posting, commenting, messaging, moderated profile edits, image uploads, feedback screenshots, and forumAI require OpenAI processing for their safety or AI function and will ask again when needed. You can withdraw permission at any time under Settings → Privacy → OpenAI processing. Withdrawal stops new content from being sent; it does not reverse processing that occurred while permission was active.</p>
 
 <h2>What we don't do</h2>
 <ul>
   <li>No selling or renting personal data.</li>
   <li>No third-party advertising or tracking SDKs.</li>
-  <li>No routine human reading of direct messages. Automated safety checks process messages before delivery; moderators may review content included in an abuse report when that reporting flow is available.</li>
+  <li>No routine human reading of direct messages. With your permission, automated safety checks process messages before delivery; moderators may review content included in an abuse report when that reporting flow is available.</li>
 </ul>
 
 <h2>Service providers</h2>

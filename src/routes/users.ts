@@ -1,5 +1,10 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
+import {
+  AI_CONSENT_VERSION,
+  currentAIConsent,
+  recordAIConsent,
+} from '../lib/ai-consent'
 import { requireAuth } from '../middleware/auth'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
@@ -13,14 +18,45 @@ const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, is_private,
 users.get('/me', requireAuth, async (c) => {
   const result = await query(
     `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private,
-            u.created_at, u.is_admin, a.email, a.email_verified
+            u.created_at, u.is_admin, a.email, a.email_verified,
+            COALESCE(ai.status, 'not_asked') AS ai_consent_status,
+            ai.consent_version AS ai_consent_version,
+            (ai.status = 'accepted' AND ai.consent_version = $2) AS ai_consent_current
      FROM userdata u
      LEFT JOIN auth_credentials a ON a.user_id = u.id
+     LEFT JOIN ai_data_consents ai ON ai.user_id = u.id
      WHERE u.id = $1`,
-    [c.get('userId')]
+    [c.get('userId'), AI_CONSENT_VERSION]
   )
   if (!result.rows[0]) return c.json({ error: 'User not found' }, 404)
   return c.json(result.rows[0])
+})
+
+// Explicit third-party AI permission. Reading the app never requires this.
+// Declining or revoking prevents later user content from reaching OpenAI.
+users.get('/me/ai-consent', requireAuth, async (c) => {
+  const consent = await currentAIConsent(c.get('userId'))
+  return c.json({ ...consent, consent_version: AI_CONSENT_VERSION })
+})
+
+users.put('/me/ai-consent', requireAuth, async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (typeof body?.accepted !== 'boolean') {
+    return c.json({ error: 'accepted must be true or false.' }, 400)
+  }
+  const version = String(body?.consent_version ?? '')
+  if (version !== AI_CONSENT_VERSION) {
+    return c.json(
+      {
+        code: 'AI_CONSENT_VERSION_MISMATCH',
+        error: 'The AI data-sharing disclosure has changed. Please review it again.',
+        consent_version: AI_CONSENT_VERSION,
+      },
+      409
+    )
+  }
+  const consent = await recordAIConsent(c.get('userId'), body.accepted, version)
+  return c.json({ ...consent, consent_version: AI_CONSENT_VERSION })
 })
 
 // PATCH /users/me — update username, bio, avatar_url, header_url

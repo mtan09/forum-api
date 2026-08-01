@@ -22,6 +22,10 @@ export async function sendEmail({ to, subject, html }: EmailInput): Promise<void
     )
     return
   }
+  const configuredFrom = process.env.EMAIL_FROM?.trim()
+  if (!configuredFrom && process.env.NODE_ENV === 'production') {
+    throw new Error('Email sender is not configured')
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -29,7 +33,7 @@ export async function sendEmail({ to, subject, html }: EmailInput): Promise<void
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: process.env.EMAIL_FROM ?? 'forum <onboarding@resend.dev>',
+      from: configuredFrom || 'forum <onboarding@resend.dev>',
       to: [to],
       subject,
       html,

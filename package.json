@@ -20,6 +20,7 @@
     "setup": "node scripts/setup.mjs",
     "account:release": "tsx scripts/create-release-account.ts",
     "migrate:release": "tsx scripts/apply-release-migration.ts",
+    "migrate:017": "tsx scripts/apply-017-migration.ts",
     "verify:release": "tsx scripts/verify-release-migration.ts",
     "storage:feedback": "tsx scripts/ensure-feedback-bucket.ts",
     "verify:feedback-storage": "tsx scripts/verify-feedback-storage.ts",

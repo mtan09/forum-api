@@ -1,9 +1,11 @@
 import { randomBytes, randomInt, randomUUID } from 'crypto'
 import { Hono } from 'hono'
 import pool from '../db'
+import { AI_CONSENT_VERSION } from '../lib/ai-consent'
 import { hashPassword, issueToken, verifyPassword } from '../lib/auth'
 import { resetEmail, sendEmail, verificationEmail } from '../lib/email'
 import { moderateText, moderationFailure } from '../lib/moderation'
+import { publicApiOrigin } from '../lib/public-url'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -39,12 +41,16 @@ async function sendVerification(userId: string, email: string, origin: string): 
   await sendEmail({ to: email, subject, html })
 }
 
-// POST /auth/signup  { username, email, password }
+// POST /auth/signup
+// { username, email, password, ai_consent_accepted, ai_consent_version }
 auth.post('/signup', signupLimit, async (c) => {
   const body = await c.req.json().catch(() => null)
   const username = String(body?.username ?? '').trim()
   const email = String(body?.email ?? '').trim().toLowerCase()
   const password = String(body?.password ?? '')
+  const consentAccepted =
+    typeof body?.ai_consent_accepted === 'boolean' ? body.ai_consent_accepted : null
+  const consentVersion = String(body?.ai_consent_version ?? '')
 
   if (username.length < 3 || username.length > 24) {
     return c.json({ error: 'Username must be 3–24 characters.' }, 400)
@@ -55,7 +61,30 @@ auth.post('/signup', signupLimit, async (c) => {
   if (password.length < 6) {
     return c.json({ error: 'Password must be at least 6 characters.' }, 400)
   }
-  const moderation = await moderateText(null, 'username', username)
+  if (consentAccepted === null) {
+    return c.json(
+      {
+        code: 'AI_CONSENT_DECISION_REQUIRED',
+        error: 'Choose whether to allow OpenAI processing before creating your account.',
+      },
+      400
+    )
+  }
+  if (consentVersion !== AI_CONSENT_VERSION) {
+    return c.json(
+      {
+        code: 'AI_CONSENT_VERSION_MISMATCH',
+        error: 'The AI data-sharing disclosure has changed. Please review it again.',
+        consent_version: AI_CONSENT_VERSION,
+      },
+      409
+    )
+  }
+  const moderation = await moderateText(null, 'username', username, {
+    // A declined signup remains available. Its username is checked only by
+    // forum's deterministic rules and is never shared with OpenAI.
+    useProvider: consentAccepted,
+  })
   const moderationError = moderationFailure(moderation)
   if (moderationError) return c.json(moderationError.body, moderationError.status)
 
@@ -73,13 +102,31 @@ auth.post('/signup', signupLimit, async (c) => {
       'INSERT INTO auth_credentials (user_id, email, password_hash) VALUES ($1, $2, $3)',
       [userId, email, passwordHash]
     )
+    await client.query(
+      `INSERT INTO ai_data_consents (user_id, consent_version, status, decided_at)
+       VALUES ($1, $2, $3, NOW())`,
+      [userId, AI_CONSENT_VERSION, consentAccepted ? 'accepted' : 'declined']
+    )
     await client.query('COMMIT')
 
     const token = await issueToken(userId)
     // Fire-and-forget so a slow mail provider never delays signup
-    sendVerification(userId, email, new URL(c.req.url).origin)
+    sendVerification(userId, email, publicApiOrigin(c.req.raw))
       .catch((err) => console.error('[email] verification send failed:', err?.message))
-    return c.json({ token, user: { ...userResult.rows[0], email, email_verified: false } }, 201)
+    return c.json(
+      {
+        token,
+        user: {
+          ...userResult.rows[0],
+          email,
+          email_verified: false,
+          ai_consent_status: consentAccepted ? 'accepted' : 'declined',
+          ai_consent_current: consentAccepted,
+          ai_consent_version: AI_CONSENT_VERSION,
+        },
+      },
+      201
+    )
   } catch (err: any) {
     await client.query('ROLLBACK')
     if (err?.code === '23505') {
@@ -104,11 +151,15 @@ auth.post('/login', loginLimit, async (c) => {
 
   const result = await pool.query(
     `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at,
-            u.is_banned, a.email, a.password_hash
+            u.is_banned, a.email, a.email_verified, a.password_hash,
+            COALESCE(ai.status, 'not_asked') AS ai_consent_status,
+            ai.consent_version AS ai_consent_version,
+            (ai.status = 'accepted' AND ai.consent_version = $2) AS ai_consent_current
      FROM auth_credentials a
      JOIN userdata u ON u.id = a.user_id
+     LEFT JOIN ai_data_consents ai ON ai.user_id = u.id
      WHERE a.email = $1`,
-    [email]
+    [email, AI_CONSENT_VERSION]
   )
 
   const row = result.rows[0]
@@ -164,13 +215,20 @@ auth.get('/verify', async (c) => {
       </div>`)
 
   const result = await pool.query(
-    `DELETE FROM email_tokens WHERE token = $1 AND kind = 'verify' AND expires_at > NOW()
-     RETURNING user_id`,
+    `WITH claimed AS (
+       DELETE FROM email_tokens
+       WHERE token = $1 AND kind = 'verify' AND expires_at > NOW()
+       RETURNING user_id
+     )
+     UPDATE auth_credentials AS credentials
+     SET email_verified = TRUE
+     FROM claimed
+     WHERE credentials.user_id = claimed.user_id
+     RETURNING credentials.user_id`,
     [token]
   )
   const row = result.rows[0]
   if (!row) return page('Link expired', 'Request a new verification email from Settings in the app.', false)
-  await pool.query('UPDATE auth_credentials SET email_verified = TRUE WHERE user_id = $1', [row.user_id])
   return page('Email verified ✓', 'You can close this page and head back to the app.', true)
 })
 
@@ -188,7 +246,7 @@ auth.post(
     const row = result.rows[0]
     if (!row) return c.json({ error: 'User not found' }, 404)
     if (row.email_verified) return c.json({ ok: true, already_verified: true })
-    await sendVerification(c.get('userId'), row.email, new URL(c.req.url).origin)
+    await sendVerification(c.get('userId'), row.email, publicApiOrigin(c.req.raw))
     return c.json({ ok: true })
   }
 )

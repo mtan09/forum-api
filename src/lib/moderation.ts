@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import OpenAI from 'openai'
 import { query } from '../db'
+import { hasCurrentAIConsent } from './ai-consent'
 
 export type ModerationSurface =
   | 'post'
@@ -12,7 +13,7 @@ export type ModerationSurface =
   | 'image'
 
 export type ModerationDecision = {
-  decision: 'allow' | 'reject' | 'review' | 'unavailable'
+  decision: 'allow' | 'reject' | 'review' | 'unavailable' | 'consent_required'
   provider: 'rules' | 'openai'
   model?: string
   categories: string[]
@@ -30,6 +31,10 @@ type ModerationOptions = {
   }>
   audit?: boolean
   reviewFlagged?: boolean
+  /** Signup can run deterministic rules without sharing data with OpenAI. */
+  useProvider?: boolean
+  /** Tests and pre-validated callers can provide the already-resolved state. */
+  consentGranted?: boolean
 }
 
 const MODEL = 'omni-moderation-latest'
@@ -155,6 +160,34 @@ export async function moderateText(
     return result
   }
 
+  if (options.useProvider === false) {
+    const result: ModerationDecision = {
+      decision: 'allow',
+      provider: 'rules',
+      categories: [],
+      metadata: {
+        input_characters: value.length,
+        provider_skipped: true,
+      },
+    }
+    if (options.audit !== false) await recordAudit(userId, surface, hash, result, options.target)
+    return result
+  }
+
+  if (
+    userId &&
+    !(options.consentGranted ?? (await hasCurrentAIConsent(userId)))
+  ) {
+    // Nothing has left forum's infrastructure at this point. Do not create a
+    // moderation audit for a permission decision.
+    return {
+      decision: 'consent_required',
+      provider: 'rules',
+      categories: [],
+      metadata: { input_characters: value.length },
+    }
+  }
+
   try {
     const providerResult = await (options.provider ?? openAIModerate)(value)
     const result: ModerationDecision = {
@@ -194,6 +227,14 @@ export async function moderateImage(
   options: ModerationOptions = {}
 ): Promise<ModerationDecision> {
   const hash = inputHash(bytes)
+  if (!(options.consentGranted ?? (await hasCurrentAIConsent(userId)))) {
+    return {
+      decision: 'consent_required',
+      provider: 'rules',
+      categories: [],
+      metadata: { input_bytes: bytes.length, content_type: mimeType },
+    }
+  }
   const dataUrl = `data:${mimeType};base64,${bytes.toString('base64')}`
   try {
     const providerResult = await (options.provider ?? openAIModerate)([
@@ -227,6 +268,16 @@ export async function moderateImage(
 }
 
 export function moderationFailure(result: ModerationDecision) {
+  if (result.decision === 'consent_required') {
+    return {
+      status: 428 as const,
+      body: {
+        code: 'AI_CONSENT_REQUIRED',
+        error:
+          'Permission is required before forum can send this content to OpenAI for safety processing.',
+      },
+    }
+  }
   if (result.decision === 'reject') {
     return {
       status: 422 as const,
