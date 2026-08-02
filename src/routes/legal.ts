@@ -38,7 +38,7 @@ legal.get('/terms', (c) =>
 <p>Welcome to <strong>forum</strong>, a political discussion app. By creating an account or using the app you agree to these terms.</p>
 
 <h2>1. Your account</h2>
-<p>You must provide accurate information and are responsible for activity on your account. You must be at least 17 years old to create or use an account. The signup screen asks you to confirm this minimum age and agree to these Terms and the Privacy Policy. You can delete your account at any time from Settings; your account and app data are removed immediately and associated media is removed from active storage within 24 hours.</p>
+<p>You must provide accurate information and are responsible for activity on your account. You may use forum only if applicable law and any device, family, or App Store age restrictions permit you to do so. If the law where you live requires permission from a parent or guardian, you may use forum only with that permission. The signup screen asks you to agree to these Terms and the Privacy Policy. You can delete your account at any time from Settings; your account and app data are removed immediately and associated media is removed from active storage within 24 hours.</p>
 
 <h2>2. Your content</h2>
 <p>You own what you post. By posting you grant us a non-exclusive license to display your content inside the app (that's how a forum works). You are responsible for what you post.</p>
