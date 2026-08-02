@@ -21,10 +21,13 @@
     "account:release": "tsx scripts/create-release-account.ts",
     "migrate:release": "tsx scripts/apply-release-migration.ts",
     "migrate:017": "tsx scripts/apply-017-migration.ts",
+    "migrate:018": "tsx scripts/apply-018-migration.ts",
+    "migrate:019": "tsx scripts/apply-019-migration.ts",
     "verify:release": "tsx scripts/verify-release-migration.ts",
     "storage:feedback": "tsx scripts/ensure-feedback-bucket.ts",
     "verify:feedback-storage": "tsx scripts/verify-feedback-storage.ts",
     "backfill:article-content": "tsx scripts/backfill-reverted-article-content.ts",
+    "backfill:recommendations": "tsx scripts/backfill-recommendation-embeddings.ts",
     "test": "vitest run"
   },
   "dependencies": {

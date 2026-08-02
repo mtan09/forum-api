@@ -176,7 +176,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_user_article
 CREATE TABLE IF NOT EXISTS reports (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   reporter_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
-  target_kind TEXT NOT NULL CHECK (target_kind IN ('post', 'article', 'comment', 'user')),
+  target_kind TEXT NOT NULL CHECK (target_kind IN ('post', 'article', 'comment', 'user', 'message')),
   target_id   TEXT NOT NULL,
   reason      TEXT NOT NULL CHECK (reason IN ('spam', 'harassment', 'misinformation', 'hate', 'other')),
   detail      TEXT,
@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
+  hidden BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, created_at DESC);
@@ -381,6 +382,54 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_ingest_runs_started
   ON ingest_runs (started_at DESC);
+
+-- First-party feed personalization. Recommendation vectors are deterministic
+-- local features, not third-party AI embeddings.
+CREATE TABLE IF NOT EXISTS user_interests (
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  interest_key TEXT NOT NULL,
+  weight REAL NOT NULL DEFAULT 1 CHECK (weight > 0 AND weight <= 5),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, interest_key)
+);
+
+CREATE TABLE IF NOT EXISTS feed_events (
+  id BIGSERIAL PRIMARY KEY,
+  event_id TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  feed_mode TEXT NOT NULL CHECK (feed_mode IN ('for_you', 'random', 'against')),
+  item_type TEXT NOT NULL CHECK (item_type IN ('post', 'article')),
+  item_id UUID NOT NULL,
+  event_type TEXT NOT NULL CHECK (
+    event_type IN ('impression', 'dwell', 'open', 'outbound_open', 'not_interested')
+  ),
+  position INTEGER CHECK (position IS NULL OR position >= 0),
+  dwell_ms INTEGER CHECK (dwell_ms IS NULL OR dwell_ms >= 0),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_feed_events_user_recent
+  ON feed_events (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_events_item_recent
+  ON feed_events (item_type, item_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feed_events_session
+  ON feed_events (user_id, session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS content_preferences (
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  item_type TEXT NOT NULL CHECK (item_type IN ('post', 'article')),
+  item_id UUID NOT NULL,
+  preference TEXT NOT NULL CHECK (preference IN ('not_interested')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, item_type, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_content_preferences_user
+  ON content_preferences (user_id, created_at DESC);
+
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS recommendation_embedding REAL[];
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS recommendation_embedding REAL[];
 
 CREATE TABLE IF NOT EXISTS email_tokens (
   token TEXT PRIMARY KEY,

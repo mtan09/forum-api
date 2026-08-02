@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeArticleImageUrl, selectArticleImageUrl } from './extract'
+import {
+  normalizeArticleImageUrl,
+  selectArticleImageUrl,
+  selectArticlePublishedAt,
+} from './extract'
 
 const ARTICLE = 'https://thehill.com/policy/defense/5982033-hegseth-caine-iran-funding/'
 const FEED_IMAGE =
@@ -53,5 +57,34 @@ describe('article image selection', () => {
     expect(normalizeArticleImageUrl('https://cdn.example.com/image/opaque-id', ARTICLE)).toBe(
       'https://cdn.example.com/image/opaque-id'
     )
+  })
+})
+
+describe('article publication date selection', () => {
+  const now = new Date('2026-08-01T12:00:00.000Z')
+
+  it('keeps a valid feed date when page metadata is implausibly in the future', () => {
+    const feed = new Date('2026-07-27T12:33:21.000Z')
+    expect(selectArticlePublishedAt(feed, '2027-07-26T00:00:00', now)).toEqual(feed)
+  })
+
+  it('rejects a far-future page date when no valid feed date exists', () => {
+    expect(selectArticlePublishedAt(null, '2027-03-26T04:00:00.000Z', now)).toBeNull()
+  })
+
+  it('uses valid page metadata when the feed has no publication date', () => {
+    expect(selectArticlePublishedAt(null, '2026-07-21T04:00:00.000Z', now)?.toISOString()).toBe(
+      '2026-07-21T04:00:00.000Z'
+    )
+  })
+
+  it('falls back to valid page metadata when the feed date is far in the future', () => {
+    expect(
+      selectArticlePublishedAt(
+        new Date('2027-01-01T00:00:00.000Z'),
+        '2026-07-31T15:00:00.000Z',
+        now
+      )?.toISOString()
+    ).toBe('2026-07-31T15:00:00.000Z')
   })
 })

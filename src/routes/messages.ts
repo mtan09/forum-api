@@ -37,13 +37,15 @@ messages.get('/', requireAuth, async (c) => {
             (SELECT count(*)::int FROM messages m
              WHERE m.conversation_id = conv.id
                AND m.sender_id <> $1
+               AND m.hidden = FALSE
                AND m.created_at > COALESCE(r.last_read_at, 'epoch')) AS unread
      FROM conversations conv
      JOIN userdata other ON other.id = CASE WHEN conv.a_id = $1 THEN conv.b_id ELSE conv.a_id END
      LEFT JOIN conversation_reads r ON r.conversation_id = conv.id AND r.user_id = $1
      LEFT JOIN LATERAL (
        SELECT content, sender_id FROM messages m
-       WHERE m.conversation_id = conv.id ORDER BY m.created_at DESC LIMIT 1
+       WHERE m.conversation_id = conv.id AND m.hidden = FALSE
+       ORDER BY m.created_at DESC LIMIT 1
      ) lm ON TRUE
      WHERE (conv.a_id = $1 OR conv.b_id = $1)
        AND NOT EXISTS(SELECT 1 FROM blocks bl
@@ -66,6 +68,7 @@ messages.get('/unread-count', requireAuth, async (c) => {
      LEFT JOIN conversation_reads r ON r.conversation_id = conv.id AND r.user_id = $1
      WHERE (conv.a_id = $1 OR conv.b_id = $1)
        AND m.sender_id <> $1
+       AND m.hidden = FALSE
        AND m.created_at > COALESCE(r.last_read_at, 'epoch')`,
     [me]
   )
@@ -86,7 +89,7 @@ messages.get('/with/:userId', requireAuth, async (c) => {
 
   const rows = await query(
     `SELECT id, sender_id, content, created_at
-     FROM messages WHERE conversation_id = $1
+     FROM messages WHERE conversation_id = $1 AND hidden = FALSE
      ORDER BY created_at DESC LIMIT $2`,
     [conversationId, limit]
   )

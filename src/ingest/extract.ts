@@ -10,6 +10,7 @@ import { looksLikeVideoPlaylistChrome } from './content-quality'
 import { stripHtml, type FeedItem } from './rss'
 
 const MIN_USABLE_CHARS = 600
+const MAX_FUTURE_SKEW_MS = 6 * 60 * 60 * 1000
 const IMAGE_EXTENSION = /\.(?:avif|gif|jpe?g|png|webp)$/i
 const NON_IMAGE_EXTENSION =
   /\.(?:m3u8|m4a|m4v|mov|mp3|mp4|mpeg|mpg|ogg|ogv|wav|webm)(?:$|[?#])/i
@@ -28,6 +29,29 @@ function parsePageDate(v: string | undefined): Date | null {
   if (!v) return null
   const d = new Date(v)
   return Number.isNaN(d.getTime()) ? null : d
+}
+
+function plausiblePublishedAt(value: Date | null, now: Date): Date | null {
+  if (!value || Number.isNaN(value.getTime())) return null
+  return value.getTime() <= now.getTime() + MAX_FUTURE_SKEW_MS ? value : null
+}
+
+/**
+ * RSS/Atom publication dates are the canonical clock for feed items. Page
+ * metadata is only a fallback because publishers occasionally expose a
+ * copyright year, event date, or another unrelated value as `published`.
+ * Rejecting far-future values also prevents malformed records from remaining
+ * "just now" in clients indefinitely.
+ */
+export function selectArticlePublishedAt(
+  feedDate: Date | null,
+  pageValue?: string,
+  now = new Date()
+): Date | null {
+  return (
+    plausiblePublishedAt(feedDate, now) ??
+    plausiblePublishedAt(parsePageDate(pageValue), now)
+  )
 }
 
 // Some page metadata is malformed. The Hill, for example, occasionally
@@ -83,7 +107,7 @@ export async function extractArticleText(item: FeedItem): Promise<ExtractedArtic
     return {
       text: feedText,
       imageUrl: selectArticleImageUrl(item.url, item.imageUrl),
-      publishedAt: item.publishedAt,
+      publishedAt: selectArticlePublishedAt(item.publishedAt),
       usedFullPage: false,
     }
   }
@@ -98,7 +122,7 @@ export async function extractArticleText(item: FeedItem): Promise<ExtractedArtic
       return {
         text: pageText,
         imageUrl: selectArticleImageUrl(item.url, item.imageUrl, page?.image),
-        publishedAt: parsePageDate(page?.published) ?? item.publishedAt,
+        publishedAt: selectArticlePublishedAt(item.publishedAt, page?.published),
         usedFullPage: true,
       }
     }
@@ -109,7 +133,7 @@ export async function extractArticleText(item: FeedItem): Promise<ExtractedArtic
   return {
     text: feedText,
     imageUrl: selectArticleImageUrl(item.url, item.imageUrl),
-    publishedAt: item.publishedAt,
+    publishedAt: selectArticlePublishedAt(item.publishedAt),
     usedFullPage: false,
   }
 }

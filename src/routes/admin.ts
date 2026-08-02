@@ -26,12 +26,14 @@ admin.get('/reports', async (c) => {
               WHEN 'comment' THEN (SELECT left(cm.content, 200) FROM comments cm WHERE cm.id::text = r.target_id)
               WHEN 'article' THEN (SELECT a.title FROM articles a WHERE a.id::text = r.target_id)
               WHEN 'user'    THEN (SELECT u.username FROM userdata u WHERE u.id = r.target_id)
+              WHEN 'message' THEN (SELECT left(m.content, 200) FROM messages m WHERE m.id::text = r.target_id)
             END AS target_preview,
             CASE r.target_kind
               WHEN 'post'    THEN (SELECT u.username FROM posts p JOIN userdata u ON u.id = p.user_id WHERE p.id::text = r.target_id)
               WHEN 'comment' THEN (SELECT u.username FROM comments cm JOIN userdata u ON u.id = cm.user_id WHERE cm.id::text = r.target_id)
               WHEN 'article' THEN (SELECT a.source FROM articles a WHERE a.id::text = r.target_id)
               WHEN 'user'    THEN (SELECT u.username FROM userdata u WHERE u.id = r.target_id)
+              WHEN 'message' THEN (SELECT u.username FROM messages m JOIN userdata u ON u.id = m.sender_id WHERE m.id::text = r.target_id)
             END AS target_author
      FROM reports r
      JOIN userdata reporter ON reporter.id = r.reporter_id
@@ -44,7 +46,7 @@ admin.get('/reports', async (c) => {
 })
 
 // POST /admin/reports/:id/resolve  { action: 'hide' | 'ban' | 'dismiss' }
-//   hide    — hide the reported post/comment (vanishes from all reads)
+//   hide    — hide the reported post/comment/message (vanishes from all reads)
 //   ban     — ban the author (or the reported user); their token stops working
 //   dismiss — no action, close the report
 admin.post('/reports/:id/resolve', async (c) => {
@@ -65,6 +67,8 @@ admin.post('/reports/:id/resolve', async (c) => {
       await query('UPDATE posts SET hidden = TRUE WHERE id::text = $1', [row.target_id])
     } else if (row.target_kind === 'comment') {
       await query('UPDATE comments SET hidden = TRUE WHERE id::text = $1', [row.target_id])
+    } else if (row.target_kind === 'message') {
+      await query('UPDATE messages SET hidden = TRUE WHERE id::text = $1', [row.target_id])
     } else {
       return c.json({ error: `Hide is not applicable to ${row.target_kind} reports.` }, 400)
     }
@@ -76,6 +80,8 @@ admin.post('/reports/:id/resolve', async (c) => {
           ? (await query('SELECT user_id FROM posts WHERE id::text = $1', [row.target_id])).rows[0]?.user_id
           : row.target_kind === 'comment'
             ? (await query('SELECT user_id FROM comments WHERE id::text = $1', [row.target_id])).rows[0]?.user_id
+            : row.target_kind === 'message'
+              ? (await query('SELECT sender_id FROM messages WHERE id::text = $1', [row.target_id])).rows[0]?.sender_id
             : null
     if (!authorId) return c.json({ error: 'No user to ban for this report.' }, 400)
     await query('UPDATE userdata SET is_banned = TRUE WHERE id = $1', [authorId])

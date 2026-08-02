@@ -7,6 +7,7 @@ import { notify } from '../lib/push'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import { scorePost } from '../scoring/score'
+import { semanticEmbedding } from '../recommendation/semantic'
 import type { AppEnv } from '../types'
 
 const posts = new Hono<AppEnv>()
@@ -113,11 +114,13 @@ posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_0
 
   const inserted = await query(
     `INSERT INTO posts (user_id, content, media_url, general_topic_id, hashtags,
-                        position, position_confidence, position_signals, scorer_version)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+                        position, position_confidence, position_signals, scorer_version,
+                        recommendation_embedding)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
     [
       c.get('userId'), content, mediaUrl, topic.generalTopicId, hashtags,
       score.position, score.confidence, score.signals, score.scorer_version,
+      semanticEmbedding(content),
     ]
   )
   const result = await query(`${POST_SELECT} WHERE p.id = $2`, [

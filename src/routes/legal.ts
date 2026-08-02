@@ -38,7 +38,7 @@ legal.get('/terms', (c) =>
 <p>Welcome to <strong>forum</strong>, a political discussion app. By creating an account or using the app you agree to these terms.</p>
 
 <h2>1. Your account</h2>
-<p>You must provide accurate information and are responsible for activity on your account. You must be at least 17 years old to use forum. You can delete your account at any time from Settings; your account and app data are removed immediately and associated media is removed from active storage within 24 hours.</p>
+<p>You must provide accurate information and are responsible for activity on your account. You must be at least 17 years old to create or use an account. The signup screen asks you to confirm this minimum age and agree to these Terms and the Privacy Policy. You can delete your account at any time from Settings; your account and app data are removed immediately and associated media is removed from active storage within 24 hours.</p>
 
 <h2>2. Your content</h2>
 <p>You own what you post. By posting you grant us a non-exclusive license to display your content inside the app (that's how a forum works). You are responsible for what you post.</p>
@@ -73,6 +73,7 @@ legal.get('/privacy', (c) =>
 <ul>
   <li><strong>Account:</strong> email address, username, password (stored as a scrypt hash — we can never read it), optional bio and profile images, account privacy setting, and follow requests.</li>
   <li><strong>Content and activity:</strong> your posts, comments, votes, bookmarks, debate stances, follows, and direct messages.</li>
+  <li><strong>Feed personalization:</strong> interests you choose, items shown in your feed, opens, approximate time visible, outbound publisher opens, and “Not interested” choices. These first-party signals are used to rank and diversify your feed; they are not used for advertising.</li>
   <li><strong>Computed data:</strong> a political-lean placement derived from your posts and votes by a deterministic algorithm. It exists only inside the app and is shown on your profile.</li>
   <li><strong>Device and diagnostics:</strong> a push-notification token if you enable notifications. Crash diagnostics may include app version, build, device model, operating-system version, and the screen where a problem occurred. We do not collect contacts or advertising identifiers. Uploaded photos have their metadata (including GPS EXIF) stripped on upload.</li>
   <li><strong>Beta feedback:</strong> feedback text, an optional screenshot, and the route, theme, app version/build, platform, OS, and device metadata attached to the report.</li>
@@ -81,6 +82,7 @@ legal.get('/privacy', (c) =>
 <h2>How it's used</h2>
 <ul>
   <li>To operate the product: showing your content, computing placements, delivering notifications you opted into, and sending account emails (verification, password reset).</li>
+  <li><strong>Recommendations:</strong> forum locally creates numeric topic vectors from posts and article coverage, then combines them with your selected interests and in-app activity. Behavioral profiles are not sent to OpenAI or an advertising network. You can clear selected interests, viewing signals, and “Not interested” choices under Settings → Content → Reset feed personalization.</li>
   <li><strong>forumAI:</strong> if you explicitly allow OpenAI processing, your question, recent conversation context, and relevant article/post or news context are sent to OpenAI to generate the answer. They are not used by forum to build an advertising profile.</li>
   <li><strong>Moderation:</strong> narrow safety rules run on forum's server first. If you explicitly allow OpenAI processing, usernames, profile text, posts, comments, direct messages, forumAI prompts, and uploaded images are also sent to OpenAI's moderation service. We store decision metadata and a one-way input hash for audit, not rejected raw content.</li>
   <li><strong>Beta quality:</strong> structured feedback and crash diagnostics help us reproduce and fix problems.</li>
@@ -94,7 +96,7 @@ legal.get('/privacy', (c) =>
 <ul>
   <li>No selling or renting personal data.</li>
   <li>No third-party advertising or tracking SDKs.</li>
-  <li>No routine human reading of direct messages. With your permission, automated safety checks process messages before delivery; moderators may review content included in an abuse report when that reporting flow is available.</li>
+  <li>No routine human reading of direct messages. With your permission, automated safety checks process messages before delivery. A recipient can report a received message, in which case moderators may review that reported message and take action.</li>
 </ul>
 
 <h2>Service providers</h2>

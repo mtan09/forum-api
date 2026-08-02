@@ -6,7 +6,7 @@ import type { AppEnv } from '../types'
 
 const reports = new Hono<AppEnv>()
 
-const KINDS = new Set(['post', 'article', 'comment', 'user'])
+const KINDS = new Set(['post', 'article', 'comment', 'user', 'message'])
 const REASONS = new Set(['spam', 'harassment', 'misinformation', 'hate', 'other'])
 
 // POST /reports  { target_kind, target_id, reason, detail? }
@@ -22,6 +22,25 @@ reports.post('/', requireAuth, rateLimit({ name: 'report', windowMs: 24 * 60 * 6
   if (!KINDS.has(kind)) return c.json({ error: 'Invalid target_kind.' }, 400)
   if (!targetId) return c.json({ error: 'target_id is required.' }, 400)
   if (!REASONS.has(reason)) return c.json({ error: 'Invalid reason.' }, 400)
+
+  // A private message can only be reported by its recipient. This prevents
+  // arbitrary id probing and keeps the original message as the evidence the
+  // admin queue reviews instead of duplicating private text into an audit log.
+  if (kind === 'message') {
+    const reporterId = c.get('userId')
+    const message = await query(
+      `SELECT 1
+       FROM messages m
+       JOIN conversations conv ON conv.id = m.conversation_id
+       WHERE m.id::text = $1
+         AND m.hidden = FALSE
+         AND m.sender_id <> $2
+         AND (conv.a_id = $2 OR conv.b_id = $2)
+       LIMIT 1`,
+      [targetId, reporterId]
+    )
+    if (!message.rows[0]) return c.json({ error: 'Message not found.' }, 404)
+  }
 
   await query(
     `INSERT INTO reports (reporter_id, target_kind, target_id, reason, detail)

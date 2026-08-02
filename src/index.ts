@@ -21,6 +21,7 @@ import bookmarksRoutes from './routes/bookmarks'
 import commentsRoutes from './routes/comments'
 import debatesRoutes from './routes/debates'
 import feedbackRoutes from './routes/feedback'
+import feedRoutes from './routes/feed'
 import legalRoutes from './routes/legal'
 import messagesRoutes from './routes/messages'
 import postsRoutes from './routes/posts'
@@ -67,6 +68,7 @@ app.route('/comments', commentsRoutes)
 app.route('/bookmarks', bookmarksRoutes)
 app.route('/debates',  debatesRoutes)
 app.route('/feedback', feedbackRoutes)
+app.route('/feed',     feedRoutes)
 app.route('/messages', messagesRoutes)
 app.route('/legal',    legalRoutes)
 app.route('/',         shareRoutes)

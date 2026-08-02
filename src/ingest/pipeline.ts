@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import pool, { query } from '../db'
 import { captureException, captureMessage } from '../lib/sentry'
 import { scoreArticle } from '../scoring/score'
+import { semanticEmbedding } from '../recommendation/semantic'
 import { clusterAndPublish } from './cluster'
 import { extractArticleText } from './extract'
 import { extractKeywords, toHashtags } from './keywords'
@@ -123,8 +124,8 @@ async function ingestSource(source: Source, stats: IngestStats) {
            (url, content_hash, title, source, content, media,
             political_lean, political_relevance, lean_confidence,
             content_type, lean_signals, source_lean, scorer_version,
-            general_topic_id, hashtags, published_at, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'ready')
+            general_topic_id, hashtags, published_at, recommendation_embedding, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'ready')
          ON CONFLICT DO NOTHING`,
         [
           item.url, contentHash, item.title, source.name,
@@ -132,6 +133,7 @@ async function ingestSource(source: Source, stats: IngestStats) {
           score.political_lean, score.political_relevance, score.lean_confidence,
           score.content_type, score.lean_signals, source.lean, score.scorer_version,
           topic.generalTopicId, hashtags, extracted.publishedAt,
+          semanticEmbedding(`${item.title}. ${item.title}. ${extracted.text}`),
         ]
       )
       stats.inserted += inserted.rowCount ?? 0
