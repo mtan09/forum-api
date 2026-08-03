@@ -62,7 +62,7 @@ describe('deterministic moderation', () => {
     expect(result.decision).toBe('reject')
   })
 
-  it('does not call OpenAI when an authenticated user has not consented', async () => {
+  it('keeps clean text features available without sending declined content to OpenAI', async () => {
     let called = false
     const result = await moderateText('user', 'post', 'A normal political opinion.', {
       audit: false,
@@ -73,10 +73,37 @@ describe('deterministic moderation', () => {
       },
     })
     expect(called).toBe(false)
+    expect(result).toMatchObject({
+      decision: 'allow',
+      provider: 'rules',
+      metadata: { provider_skipped: true, consent_not_granted: true },
+    })
+  })
+
+  it('requires current consent when the feature inherently uses OpenAI', async () => {
+    let called = false
+    const result = await moderateText('user', 'forumai_prompt', 'Explain this story.', {
+      audit: false,
+      consentGranted: false,
+      requireProviderConsent: true,
+      provider: async () => {
+        called = true
+        return { flagged: false, categories: [] }
+      },
+    })
+    expect(called).toBe(false)
     expect(moderationFailure(result)).toMatchObject({
       status: 428,
       body: { code: 'AI_CONSENT_REQUIRED' },
     })
+  })
+
+  it('still hard-stops unsafe text after a user declines OpenAI', async () => {
+    const result = await moderateText('user', 'dm', 'I am going to kill you tonight.', {
+      audit: false,
+      consentGranted: false,
+    })
+    expect(result).toMatchObject({ decision: 'reject', provider: 'rules' })
   })
 
   it('can apply on-server rules without a provider during declined signup', async () => {

@@ -33,6 +33,8 @@ type ModerationOptions = {
   reviewFlagged?: boolean
   /** Signup can run deterministic rules without sharing data with OpenAI. */
   useProvider?: boolean
+  /** forumAI cannot operate without OpenAI and must require current consent. */
+  requireProviderConsent?: boolean
   /** Tests and pre-validated callers can provide the already-resolved state. */
   consentGranted?: boolean
 }
@@ -174,18 +176,30 @@ export async function moderateText(
     return result
   }
 
-  if (
-    userId &&
-    !(options.consentGranted ?? (await hasCurrentAIConsent(userId)))
-  ) {
-    // Nothing has left forum's infrastructure at this point. Do not create a
-    // moderation audit for a permission decision.
-    return {
-      decision: 'consent_required',
+  if (userId && !(options.consentGranted ?? (await hasCurrentAIConsent(userId)))) {
+    if (options.requireProviderConsent) {
+      // Nothing has left forum's infrastructure at this point. Do not create a
+      // moderation audit for a permission decision.
+      return {
+        decision: 'consent_required',
+        provider: 'rules',
+        categories: [],
+        metadata: { input_characters: value.length },
+      }
+    }
+
+    const result: ModerationDecision = {
+      decision: 'allow',
       provider: 'rules',
       categories: [],
-      metadata: { input_characters: value.length },
+      metadata: {
+        input_characters: value.length,
+        provider_skipped: true,
+        consent_not_granted: true,
+      },
     }
+    if (options.audit !== false) await recordAudit(userId, surface, hash, result, options.target)
+    return result
   }
 
   try {

@@ -126,7 +126,9 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
   const framing = String(body?.framing ?? 'General Audience')
   const history = Array.isArray(body?.history) ? (body.history as HistoryItem[]) : []
   if (!message) return c.json({ error: 'message is required.' }, 400)
-  const moderation = await moderateText(c.get('userId'), 'forumai_prompt', message)
+  const moderation = await moderateText(c.get('userId'), 'forumai_prompt', message, {
+    requireProviderConsent: true,
+  })
   const moderationError = moderationFailure(moderation)
   if (moderationError) return c.json(moderationError.body, moderationError.status)
 

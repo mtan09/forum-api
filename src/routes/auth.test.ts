@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AI_CONSENT_VERSION } from '../lib/ai-consent'
 import type { AppEnv } from '../types'
 
 const mocks = vi.hoisted(() => {
@@ -100,7 +101,7 @@ describe('signup OpenAI permission', () => {
         email: 'reader@example.com',
         password: 'secret1',
         ai_consent_accepted: false,
-        ai_consent_version: '2026-07-30',
+        ai_consent_version: AI_CONSENT_VERSION,
       }),
     })
 
@@ -121,7 +122,7 @@ describe('signup OpenAI permission', () => {
     const generatedUserId = mocks.clientQuery.mock.calls[1][1][0]
     expect(mocks.clientQuery.mock.calls[3][1]).toEqual([
       generatedUserId,
-      '2026-07-30',
+      AI_CONSENT_VERSION,
       'declined',
     ])
   })

@@ -3,7 +3,7 @@ import { query } from '../db'
 // Bump this whenever the categories of data, provider, or purposes in the
 // disclosure materially change. A new version intentionally requires a new
 // decision instead of silently treating old permission as current.
-export const AI_CONSENT_VERSION = '2026-07-30'
+export const AI_CONSENT_VERSION = '2026-08-02'
 
 export type AIConsentStatus = 'accepted' | 'declined' | 'revoked' | 'not_asked'
 

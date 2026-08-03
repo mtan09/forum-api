@@ -5,6 +5,7 @@ import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 
 import pool from './db'
+import { redactRequestLog } from './lib/request-log'
 import { captureException, initSentry } from './lib/sentry'
 import { processDeletionJobs } from './jobs/deletion'
 import { flushEmailDigests, processPushReceipts } from './lib/push'
@@ -35,7 +36,7 @@ import usersRoutes from './routes/users'
 
 const app = new Hono<AppEnv>()
 
-app.use('*', logger())
+app.use('*', logger((message, ...rest) => console.log(redactRequestLog(message), ...rest)))
 app.use('*', cors())
 // Coarse safety net per client IP; the sensitive routes layer stricter,
 // user-keyed limits on top of this.

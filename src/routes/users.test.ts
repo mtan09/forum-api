@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { AI_CONSENT_VERSION } from '../lib/ai-consent'
 import type { AppEnv } from '../types'
 
 const mocks = vi.hoisted(() => ({
@@ -121,7 +122,7 @@ describe('private follows and notification preferences', () => {
     await expect(response.json()).resolves.toMatchObject({
       status: 'not_asked',
       current: false,
-      consent_version: '2026-07-30',
+      consent_version: AI_CONSENT_VERSION,
     })
   })
 
@@ -131,14 +132,14 @@ describe('private follows and notification preferences', () => {
       .mockResolvedValueOnce({
         rows: [{
           status: 'accepted',
-          consent_version: '2026-07-30',
+          consent_version: AI_CONSENT_VERSION,
           decided_at: '2026-07-30T00:00:00.000Z',
         }],
       })
     const response = await app.request('/users/me/ai-consent', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ accepted: true, consent_version: '2026-07-30' }),
+      body: JSON.stringify({ accepted: true, consent_version: AI_CONSENT_VERSION }),
     })
     expect(response.status).toBe(200)
     await expect(response.json()).resolves.toMatchObject({
