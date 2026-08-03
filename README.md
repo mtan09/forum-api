@@ -148,7 +148,7 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.
 5. Set `OPENAI_API_KEY`, an explicit `AI_DAILY_LIMIT`, and Sentry. Production email sends from `accounts@updates.forumeveryside.com`; keep the Resend API key in Railway only and retain the verified SPF/DKIM/DMARC records in Cloudflare.
-6. Create separate owner/admin and non-admin reviewer accounts with `npm run account:release`. Use a controlled real inbox for the reviewer; `RELEASE_ACCOUNT_ROLE=reviewer` removes admin access even when updating an existing account. Credentials belong in a password manager/App Store Connect, never this repository.
+6. Create separate owner/admin and non-admin reviewer accounts with `npm run account:release`. The utility marks the controlled address verified, clears suspension/privacy state, and makes only the `owner` role an admin; updating with `RELEASE_ACCOUNT_ROLE=reviewer` removes admin access. Credentials belong in a password manager/App Store Connect, never this repository.
 7. Treat recovery as production-ready only after a controlled account receives a six-digit reset code and completes the reset in the iOS app. A successful API response alone is intentionally non-enumerating and does not prove that Resend delivered the message.
 
 The Expo app auto-derives the API URL from the Metro dev-server host in development, so a phone on the same Wi-Fi works with zero config.

@@ -31,12 +31,14 @@ async function main() {
     if (existing.rows[0]) {
       await client.query(
         `UPDATE userdata
-         SET username = $2, is_admin = $3, is_banned = FALSE
+         SET username = $2, is_admin = $3, is_banned = FALSE, is_private = FALSE
          WHERE id = $1`,
         [userId, username, role === 'owner']
       )
       await client.query(
-        `UPDATE auth_credentials SET password_hash = $2 WHERE user_id = $1`,
+        `UPDATE auth_credentials
+         SET password_hash = $2, email_verified = TRUE
+         WHERE user_id = $1`,
         [userId, passwordHash]
       )
     } else {
@@ -45,7 +47,8 @@ async function main() {
         [userId, username, role === 'owner']
       )
       await client.query(
-        `INSERT INTO auth_credentials (user_id, email, password_hash) VALUES ($1, $2, $3)`,
+        `INSERT INTO auth_credentials (user_id, email, password_hash, email_verified)
+         VALUES ($1, $2, $3, TRUE)`,
         [userId, email, passwordHash]
       )
     }
