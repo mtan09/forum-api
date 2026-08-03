@@ -19,6 +19,7 @@
     "setup:install": "bash scripts/install-clis.sh",
     "setup": "node scripts/setup.mjs",
     "account:release": "tsx scripts/create-release-account.ts",
+    "harden:demo": "tsx scripts/harden-demo-accounts.ts",
     "migrate:release": "tsx scripts/apply-release-migration.ts",
     "migrate:017": "tsx scripts/apply-017-migration.ts",
     "migrate:018": "tsx scripts/apply-018-migration.ts",
