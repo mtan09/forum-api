@@ -213,4 +213,28 @@ admin.get('/ingest-status', async (c) => {
   })
 })
 
+// Visibility for the temporary prelaunch community worker. This never exposes
+// generated text or reviewer credentials; it only shows operational counts.
+admin.get('/demo-activity-status', async (c) => {
+  const [accounts, jobs, recent] = await Promise.all([
+    query('SELECT count(*)::int AS count FROM userdata WHERE is_demo = TRUE'),
+    query(
+      `SELECT status, count(*)::int AS count
+       FROM demo_activity_jobs GROUP BY status ORDER BY status`
+    ),
+    query(
+      `SELECT id, kind, status, scheduled_for, executed_at, attempts, last_error
+       FROM demo_activity_jobs
+       ORDER BY COALESCE(executed_at, scheduled_for) DESC
+       LIMIT 30`
+    ),
+  ])
+  return c.json({
+    enabled: process.env.DEMO_ACTIVITY_ENABLED === 'yes',
+    demo_accounts: Number(accounts.rows[0]?.count ?? 0),
+    jobs: Object.fromEntries(jobs.rows.map((row) => [row.status, Number(row.count)])),
+    recent: recent.rows,
+  })
+})
+
 export default admin

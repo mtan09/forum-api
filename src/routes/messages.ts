@@ -30,7 +30,7 @@ messages.get('/', requireAuth, async (c) => {
   const me = c.get('userId')
   const result = await query(
     `SELECT conv.id AS conversation_id,
-            other.id AS user_id, other.username, other.avatar_url,
+            other.id AS user_id, other.username, other.avatar_url, other.is_demo,
             conv.last_message_at,
             lm.content AS last_message,
             lm.sender_id AS last_sender_id,

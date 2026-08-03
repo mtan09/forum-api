@@ -12,7 +12,7 @@ const comments = new Hono<AppEnv>()
 const COMMENT_SELECT = `
   SELECT c.id, c.user_id, c.post_id, c.article_id, c.debate_id, c.parent_comment_id, c.content, c.created_at,
          c.upvotes, c.downvotes,
-         u.username, u.avatar_url,
+         u.username, u.avatar_url, u.is_demo,
          v.direction AS my_vote,
          (SELECT count(*)::int FROM comments r WHERE r.parent_comment_id = c.id) AS reply_count
   FROM comments c

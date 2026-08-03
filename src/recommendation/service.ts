@@ -201,7 +201,7 @@ async function loadProfile(userId: string, snapshot: Date): Promise<{
 const POST_DATA_FIELDS = [
   'id', 'user_id', 'content', 'media_url', 'general_topic_id', 'position',
   'position_confidence', 'position_signals', 'scorer_version', 'hashtags',
-  'upvotes', 'downvotes', 'commentcount', 'created_at', 'username', 'avatar_url',
+  'upvotes', 'downvotes', 'commentcount', 'created_at', 'username', 'avatar_url', 'is_demo',
   'my_vote', 'my_bookmark',
 ]
 const ARTICLE_DATA_FIELDS = [
@@ -245,7 +245,7 @@ async function loadPostCandidates(
      SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
             p.position_confidence, p.position_signals, p.scorer_version, p.hashtags,
             p.upvotes, p.downvotes, p.commentcount, p.created_at,
-            p.recommendation_embedding, u.username, u.avatar_url,
+            p.recommendation_embedding, u.username, u.avatar_url, u.is_demo,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
             EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = p.user_id AND f.status = 'accepted') AS followed,

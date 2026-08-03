@@ -1,11 +1,11 @@
 import 'dotenv/config'
 import { randomBytes } from 'node:crypto'
 import pool from '../src/db'
+import { demoBio, DEMO_PERSONAS } from '../src/demo/personas'
 import { AI_CONSENT_VERSION } from '../src/lib/ai-consent'
 import { hashPassword } from '../src/lib/auth'
 
 const DEMO_DOMAIN = 'example.dev'
-const DEMO_BIO = 'Fictional demo account for previewing forum.'
 const apply = process.env.DEMO_ACCOUNT_APPLY === 'yes'
 
 async function main() {
@@ -51,17 +51,25 @@ async function main() {
       )
     }
 
-    await client.query(
-      `UPDATE userdata
-       SET avatar_url = NULL,
-           header_url = NULL,
-           bio = $2,
-           is_admin = FALSE,
-           is_banned = FALSE,
-           is_private = FALSE
-       WHERE id = ANY($1::text[])`,
-      [userIds, DEMO_BIO]
-    )
+    const personaByName = new Map(DEMO_PERSONAS.map((persona) => [persona.username, persona]))
+    for (const account of accounts.rows) {
+      const persona = personaByName.get(String(account.username))
+      await client.query(
+        `UPDATE userdata
+         SET avatar_url = NULL,
+             header_url = NULL,
+             bio = $2,
+             is_admin = FALSE,
+             is_banned = FALSE,
+             is_private = FALSE,
+             is_demo = TRUE
+         WHERE id = $1`,
+        [
+          account.user_id,
+          persona ? demoBio(persona) : 'Fictional demo account for previewing forum.',
+        ]
+      )
+    }
     await client.query('DELETE FROM push_tokens WHERE user_id = ANY($1::text[])', [userIds])
     await client.query('DELETE FROM push_receipts WHERE user_id = ANY($1::text[])', [userIds])
     await client.query('DELETE FROM email_tokens WHERE user_id = ANY($1::text[])', [userIds])

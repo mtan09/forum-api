@@ -12,7 +12,7 @@ import type { AppEnv } from '../types'
 
 const auth = new Hono<AppEnv>()
 
-const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, created_at'
+const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, is_demo, created_at'
 
 // Unauthenticated, so both throttles key by IP: signup blocks bot floods,
 // login blocks credential stuffing.
@@ -150,7 +150,7 @@ auth.post('/login', loginLimit, async (c) => {
   }
 
   const result = await pool.query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.created_at,
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_demo, u.created_at,
             u.is_banned, a.email, a.email_verified, a.password_hash,
             COALESCE(ai.status, 'not_asked') AS ai_consent_status,
             ai.consent_version AS ai_consent_version,

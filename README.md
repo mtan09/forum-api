@@ -12,6 +12,7 @@ Backend for the forum app (`../forum`). Hono + Postgres, self-managed JWT auth, 
 | Storage | `./uploads` on disk, served at `/storage/files/*` | Cloudflare R2 — set the `R2_*` vars |
 | News + scoring | `npm run ingest` | Dedicated hourly Railway cron with locking, retries, and persistent run status |
 | AI chat | `POST /ai/chat` streamed (SSE) via OpenAI (`gpt-5.4-nano`) | Set `OPENAI_API_KEY` |
+| Review fixtures | Off by default | Dedicated 10-minute Railway cron running `npm run demo:activity` while `DEMO_ACTIVITY_ENABLED=yes` |
 
 ## News ingestion, bias scoring & hot-topic clustering
 
@@ -41,6 +42,7 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 - **Hardening** — every authenticated request re-resolves the user, so deleted or banned accounts invalidate old JWTs immediately. Sliding-window rate limits protect sensitive routes, uploads are re-encoded with EXIF stripped, Sentry redacts PII/tokens, and `/health` checks Postgres.
 - **Deletion and feedback** — account deletion transactionally enqueues public/private R2 cleanup with retries and a 24-hour alert. Structured beta feedback stores device/build context and optional screenshots in a separate private bucket; only admins receive short-lived signed URLs.
 - **Reliable ingestion** — a Postgres advisory lock prevents overlap, database and per-source failures retry independently, clustering remains in the successful flow, and `ingest_runs` records totals, failures, duration, and freshness.
+- **Temporary review community** — the initial prelaunch database can run 31 visibly labeled fictional personas with distinct bios, viewpoints, interests, and voices. Durable jobs stagger posts, comments, reactions, and Floor pins; generated content is moderated, auditable, and idempotent. The worker is explicitly enabled and has a guarded post-approval cleanup. See `docs/DEMO_COMMUNITY.md`.
 
 ## Getting started
 
@@ -65,6 +67,14 @@ never be written in this repository.
 `npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image URL validation, extracted-content quality, and headline-only perspective summaries); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
 Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins), and `seed:stances` (focused left/right/mixed scoring fixture for an existing mock community). The expansion includes the same substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
+
+For App Review, migration 020 and `npm run harden:demo` convert the seeded
+`@example.dev` fixtures into locked fictional demo accounts. With
+`DEMO_ACTIVITY_ENABLED=yes`, `npm run demo:activity` syncs their unique bios and
+personas, plans staggered activity, and executes due jobs. It is safe to invoke
+frequently. After approval, disable the worker, preview `npm run demo:cleanup`,
+then apply only with the exact guarded value documented in
+`docs/DEMO_COMMUNITY.md`.
 
 ## Endpoints
 
@@ -108,6 +118,7 @@ Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `
 | `GET /admin/feedback` · `PATCH /admin/feedback/:id` | Admin | Triage feedback, status, and notes |
 | `GET /admin/moderation` · `POST /admin/moderation/:id/resolve` | Admin | Review flagged existing-corpus records |
 | `GET /admin/ingest-status` | Admin | Recent ingest runs, freshness, and source failures |
+| `GET /admin/demo-activity-status` | Admin | Temporary review-fixture worker state and recent job outcomes |
 | `POST /storage/upload?filename=x.jpg` (raw bytes) | ✅ | Image upload → `{url}` (disk in dev, R2 when configured) |
 | `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream, grounded in the article corpus |
 | `GET /legal/terms` · `/legal/privacy` | — | Public legal pages |
@@ -125,6 +136,7 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 
 - Required: `DATABASE_URL`, a strong `JWT_SECRET`
 - forumAI: `OPENAI_API_KEY`, optional `AI_DAILY_LIMIT`
+- Temporary App Review fixtures: `DEMO_ACTIVITY_ENABLED=yes`, optional `DEMO_ACTIVITY_MODEL` and `DEMO_ACTIVITY_BATCH_SIZE`; remove or disable after approval
 - Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`; private feedback additionally requires `R2_FEEDBACK_BUCKET_NAME`
 - Email/public links: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`,
   `LEGAL_CONTACT_EMAIL`, `WEB_APP_URL`, and `PUBLIC_API_URL`
@@ -143,13 +155,14 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts; migration 020 identifies fictional accounts and adds the durable temporary activity queue.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.
 5. Set `OPENAI_API_KEY`, an explicit `AI_DAILY_LIMIT`, and Sentry. Production email sends from `accounts@updates.forumeveryside.com`; keep the Resend API key in Railway only and retain the verified SPF/DKIM/DMARC records in Cloudflare.
 6. Create separate owner/admin and non-admin reviewer accounts with `npm run account:release`. The utility marks the controlled address verified, clears suspension/privacy state, and makes only the `owner` role an admin; updating with `RELEASE_ACCOUNT_ROLE=reviewer` removes admin access. Credentials belong in a password manager/App Store Connect, never this repository.
 7. Preview seeded-persona release cleanup with `npm run harden:demo`, then apply it only with `DEMO_ACCOUNT_APPLY=yes npm run harden:demo`. It targets the exact `example.dev` domain, preserves posts/comments, replaces remote profile media with the app default, labels profiles as fictional demos, rotates every shared password, and removes notification/AI-consent state.
-8. Treat recovery as production-ready only after a controlled account receives a six-digit reset code and completes the reset in the iOS app. A successful API response alone is intentionally non-enumerating and does not prove that Resend delivered the message.
+8. For the disclosed prelaunch fixture, add a separate Railway cron with `npm run demo:activity` every ten minutes and set `DEMO_ACTIVITY_ENABLED=yes` only on that service. Check `/admin/demo-activity-status`. Choose manual App Store release; after approval, disable the worker and run the guarded cleanup before releasing the same approved build.
+9. Treat recovery as production-ready only after a controlled account receives a six-digit reset code and completes the reset in the iOS app. A successful API response alone is intentionally non-enumerating and does not prove that Resend delivered the message.
 
 The Expo app auto-derives the API URL from the Metro dev-server host in development, so a phone on the same Wi-Fi works with zero config.

@@ -12,12 +12,12 @@ import type { AppEnv } from '../types'
 
 const users = new Hono<AppEnv>()
 
-const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, is_private, created_at'
+const PUBLIC_USER_COLS = 'id, username, avatar_url, bio, header_url, is_private, is_demo, created_at'
 
 // GET /users/me — current user's profile including email
 users.get('/me', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private,
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.is_demo,
             u.created_at, u.is_admin, a.email, a.email_verified,
             COALESCE(ai.status, 'not_asked') AS ai_consent_status,
             ai.consent_version AS ai_consent_version,
@@ -241,7 +241,7 @@ users.get('/me/spectrum/history', requireAuth, async (c) => {
 // follow or block. Powers the onboarding "follow some people" step.
 users.get('/me/suggested', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio,
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.is_demo,
             count(p.id)::int AS post_count
      FROM userdata u
      JOIN posts p ON p.user_id = u.id AND NOT p.hidden
@@ -431,7 +431,7 @@ users.delete('/:id/block', requireAuth, async (c) => {
 // GET /users/me/blocks — who the caller has blocked, newest first
 users.get('/me/blocks', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, b.created_at AS blocked_at
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.is_demo, b.created_at AS blocked_at
      FROM blocks b JOIN userdata u ON u.id = b.blocked_id
      WHERE b.blocker_id = $1
      ORDER BY b.created_at DESC`,
@@ -446,7 +446,7 @@ users.get('/me/posts', requireAuth, async (c) => {
   const result = await query(
     `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
             p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
-            u.username, u.avatar_url,
+            u.username, u.avatar_url, u.is_demo,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
      FROM posts p
@@ -487,7 +487,7 @@ users.get('/me/upvoted', requireAuth, async (c) => {
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
               p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
-              u.username, u.avatar_url,
+              u.username, u.avatar_url, u.is_demo,
               'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
               v.created_at AS voted_at
@@ -560,7 +560,7 @@ users.get('/', requireAuth, async (c) => {
 // account. Public accounts normally have no pending rows.
 users.get('/me/follow-requests', requireAuth, async (c) => {
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, f.created_at AS requested_at
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.is_demo, f.created_at AS requested_at
      FROM follows f
      JOIN userdata u ON u.id = f.follower_id
      WHERE f.followee_id = $1 AND f.status = 'pending'
@@ -622,7 +622,7 @@ users.get('/:id/followers', requireAuth, async (c) => {
   if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
 
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.created_at,
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.is_demo, u.created_at,
             EXISTS(
               SELECT 1 FROM follows mine
               WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'
@@ -649,7 +649,7 @@ users.get('/:id/following', requireAuth, async (c) => {
   if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
 
   const result = await query(
-    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.created_at,
+    `SELECT u.id, u.username, u.avatar_url, u.bio, u.header_url, u.is_private, u.is_demo, u.created_at,
             EXISTS(
               SELECT 1 FROM follows mine
               WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'

@@ -87,7 +87,7 @@ share.get('/support', (c) => {
 // GET /p/:id — a shared post
 share.get('/p/:id', async (c) => {
   const result = await query(
-    `SELECT p.id, p.content, p.media_url, p.position, u.username
+    `SELECT p.id, p.content, p.media_url, p.position, u.username, u.is_demo
      FROM posts p JOIN userdata u ON u.id = p.user_id
      WHERE p.id::text = $1 AND NOT p.hidden`,
     [c.req.param('id')]
@@ -96,14 +96,15 @@ share.get('/p/:id', async (c) => {
   if (!row) return c.html(page({ title: 'Post not found — forum', description: '', body: '<p>This post is no longer available.</p>', deepLink: 'forum://' }), 404)
 
   const text = String(row.content ?? '')
+  const displayName = `${row.username}${row.is_demo ? ' (Fictional demo account)' : ''}`
   return c.html(
     page({
-      title: `${row.username} on forum`,
+      title: `${displayName} on forum`,
       description: text.slice(0, 160),
       image: row.media_url,
       deepLink: `forum://post/${row.id}`,
       body: `<div class="card">
-        <strong>${esc(row.username)}</strong>
+        <strong>${esc(displayName)}</strong>
         <p>${esc(text.slice(0, 500))}</p>
         ${row.media_url ? `<img class="media" src="${esc(row.media_url)}" alt="">` : ''}
       </div>`,

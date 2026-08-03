@@ -140,7 +140,7 @@ search.get('/', requireAuth, async (c) => {
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
               p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
-              u.username, u.avatar_url,
+              u.username, u.avatar_url, u.is_demo,
               v.direction AS my_vote,
               EXISTS(
                 SELECT 1 FROM bookmarks b

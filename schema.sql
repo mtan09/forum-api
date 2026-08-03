@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS userdata (
   is_admin    BOOLEAN NOT NULL DEFAULT FALSE,
   is_banned   BOOLEAN NOT NULL DEFAULT FALSE,
   is_private  BOOLEAN NOT NULL DEFAULT FALSE,
+  is_demo     BOOLEAN NOT NULL DEFAULT FALSE,
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -60,6 +61,8 @@ CREATE TABLE IF NOT EXISTS posts (
   position_confidence FLOAT CHECK (position_confidence BETWEEN 0 AND 1),
   position_signals    TEXT[] DEFAULT '{}',
   scorer_version      TEXT,
+  is_demo_generated   BOOLEAN NOT NULL DEFAULT FALSE,
+  demo_job_id         UUID,
   upvotes             INTEGER DEFAULT 0,
   downvotes           INTEGER DEFAULT 0,
   commentcount        INTEGER DEFAULT 0,
@@ -126,6 +129,8 @@ CREATE TABLE IF NOT EXISTS comments (
   debate_id         UUID REFERENCES debates(id) ON DELETE CASCADE,
   parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE,
   content           TEXT NOT NULL,
+  is_demo_generated BOOLEAN NOT NULL DEFAULT FALSE,
+  demo_job_id       UUID,
   upvotes           INTEGER DEFAULT 0,
   downvotes         INTEGER DEFAULT 0,
   hidden            BOOLEAN NOT NULL DEFAULT FALSE,
@@ -156,6 +161,46 @@ CREATE TABLE IF NOT EXISTS comment_votes (
   PRIMARY KEY (user_id, comment_id)
 );
 CREATE INDEX IF NOT EXISTS idx_comment_votes_comment ON comment_votes(comment_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_demo_job
+  ON posts (demo_job_id) WHERE demo_job_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_comments_demo_job
+  ON comments (demo_job_id) WHERE demo_job_id IS NOT NULL;
+
+-- Temporary, visibly labeled App Review community fixtures. These tables are
+-- inert unless DEMO_ACTIVITY_ENABLED=yes is set on the dedicated worker.
+CREATE TABLE IF NOT EXISTS demo_personas (
+  user_id       TEXT PRIMARY KEY REFERENCES userdata(id) ON DELETE CASCADE,
+  lean          FLOAT NOT NULL CHECK (lean BETWEEN 0 AND 1),
+  role          TEXT NOT NULL,
+  voice         TEXT NOT NULL,
+  interests     TEXT[] NOT NULL DEFAULT '{}',
+  cadence_seed  INTEGER NOT NULL,
+  active        BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS demo_activity_jobs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL CHECK (kind IN (
+                    'post', 'post_comment', 'post_vote',
+                    'debate_comment', 'debate_vote', 'comment_vote'
+                  )),
+  target_id       TEXT,
+  payload         JSONB NOT NULL DEFAULT '{}',
+  scheduled_for   TIMESTAMPTZ NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'queued'
+                  CHECK (status IN ('queued', 'running', 'completed', 'skipped', 'failed')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  executed_at     TIMESTAMPTZ,
+  dedupe_key      TEXT NOT NULL UNIQUE,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_demo_activity_due
+  ON demo_activity_jobs (scheduled_for, id) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_demo_activity_user
+  ON demo_activity_jobs (user_id, scheduled_for DESC);
 
 -- A bookmark saves a post OR an article — exactly one per row
 CREATE TABLE IF NOT EXISTS bookmarks (

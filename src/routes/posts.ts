@@ -16,7 +16,7 @@ const POST_SELECT = `
   SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
          p.position_confidence, p.position_signals, p.scorer_version,
          p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
-         u.username, u.avatar_url,
+         u.username, u.avatar_url, u.is_demo,
          v.direction AS my_vote,
          EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
   FROM posts p

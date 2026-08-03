@@ -21,7 +21,7 @@ const MAX_DEBATES = 6
 // which would wipe the evening's rooms mid-conversation.
 const APP_DAY = `(NOW() AT TIME ZONE 'America/New_York')::date`
 
-async function ensureTodaysDebates(): Promise<void> {
+export async function ensureTodaysDebates(): Promise<void> {
   const existing = await query(
     `SELECT kind, subtopic_id FROM debates WHERE debate_date = ${APP_DAY}`
   )
