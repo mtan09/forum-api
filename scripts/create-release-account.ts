@@ -19,6 +19,7 @@ async function main() {
   const password =
     process.env.RELEASE_ACCOUNT_PASSWORD ??
     randomBytes(24).toString('base64url')
+  const shouldPrintPassword = process.env.RELEASE_ACCOUNT_PRINT_PASSWORD !== 'no'
   const passwordHash = await hashPassword(password)
   const client = await pool.connect()
   try {
@@ -55,8 +56,12 @@ async function main() {
     await client.query('COMMIT')
     console.log(`Created ${role} release account.`)
     console.log(`Email: ${email}`)
-    console.log(`Password: ${password}`)
-    console.log('Store this password only in your password manager or App Store Connect.')
+    if (shouldPrintPassword) {
+      console.log(`Password: ${password}`)
+      console.log('Store this password only in your password manager or App Store Connect.')
+    } else {
+      console.log('Password output suppressed; use the securely supplied password value.')
+    }
   } catch (err) {
     await client.query('ROLLBACK')
     throw err
