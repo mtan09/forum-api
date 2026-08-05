@@ -62,7 +62,9 @@ those bounded lanes without changing the cron schedule.
 
 Failed content generation is retried twice at 30-minute intervals. Missing or
 non-demo targets are skipped. An advisory lock and job-level deduplication make
-concurrent or repeated runs safe.
+concurrent or repeated runs safe. Directionally inconsistent generated posts
+are never published; exhausted quality retries remain visible in job status and
+worker warnings without being reported as operational Sentry exceptions.
 
 ## Removal after approval
 

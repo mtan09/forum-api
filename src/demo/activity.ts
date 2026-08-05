@@ -76,6 +76,17 @@ export function demoPersonaPostsOnDay(index: number, ordinal: number): boolean {
 
 export type DemoPerspective = 'left' | 'center' | 'right'
 
+export class DemoContentQualityError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DemoContentQualityError'
+  }
+}
+
+export function isExpectedDemoContentQualityFailure(error: unknown): boolean {
+  return error instanceof DemoContentQualityError
+}
+
 export function demoPerspective(lean: number): DemoPerspective {
   if (lean < 0.42) return 'left'
   if (lean > 0.58) return 'right'
@@ -457,7 +468,10 @@ async function personaForJob(userId: string): Promise<DemoPersona | null> {
 
 async function createPost(job: ActivityJob, persona: DemoPersona): Promise<void> {
   const expected = demoPerspective(persona.lean)
-  let generated = await generateDemoPost(persona)
+  const directionRequirement = expected === 'center'
+    ? undefined
+    : `Make the ${expected}-of-center policy direction legible from the words alone. Choose an action that fits this persona and the selected topic; do not mention the political label or force an unrelated issue.`
+  let generated = await generateDemoPost(persona, directionRequirement)
   let score = scorePost(generated.text)
 
   if (!demoScoreMatchesPersona(persona.lean, score.position)) {
@@ -466,14 +480,16 @@ async function createPost(job: ActivityJob, persona: DemoPersona): Promise<void>
       : `the wording read as ${score.position < 0.5 ? 'left' : 'right'} rather than ${expected}`
     generated = await generateDemoPost(
       persona,
-      `${observed}. Rewrite around one explicit policy the persona supports or opposes. Preserve nuance and natural language.`
+      `${observed}. Rewrite rather than lightly editing. Include one unambiguous action sentence that names the relevant policy or institution and says what should be expanded, reduced, required, prohibited, funded, or cut in a way that fits the persona's ${expected}-of-center view. Preserve nuance and natural language; do not name the political label.`
     )
     score = scorePost(generated.text)
   }
   if (!demoScoreMatchesPersona(persona.lean, score.position)) {
     // Let the queued job retry with a fresh model generation. Publishing no
     // post is preferable to filling the feed with a visible generic template.
-    throw new Error(`Generated ${expected} demo post remained directionally inconsistent`)
+    throw new DemoContentQualityError(
+      `Generated ${expected} demo post remained directionally inconsistent`
+    )
   }
   const topic = await matchTopic(`${generated.text} ${generated.hashtags.join(' ')}`)
   await query(
@@ -693,7 +709,13 @@ async function failJob(job: ActivityJob, error: unknown): Promise<void> {
      WHERE id = $1`,
     [job.id, retry ? 'queued' : 'failed', message.slice(0, 500)]
   )
-  if (!retry) captureException(error, { component: 'demo-activity', jobId: job.id, kind: job.kind })
+  if (!retry) {
+    if (isExpectedDemoContentQualityFailure(error)) {
+      console.warn(`[demo] content-quality retries exhausted for ${job.kind} job ${job.id}: ${message}`)
+    } else {
+      captureException(error, { component: 'demo-activity', jobId: job.id, kind: job.kind })
+    }
+  }
 }
 
 type DemoActivityOptions = {

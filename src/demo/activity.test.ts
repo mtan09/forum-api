@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   articleEngagementOffsetMinutes,
+  DemoContentQualityError,
   demoArticleShouldReceiveComment,
   demoArticleVoterCount,
   demoPersonaPostsOnDay,
   demoPerspective,
   demoScoreMatchesPersona,
   demoVoteDirection,
+  isExpectedDemoContentQualityFailure,
   scheduledOffsetMinutes,
 } from './activity'
 import { hasBoilerplateDemoOpening, stripDemoAuthorPrefix } from './generate'
@@ -78,6 +80,13 @@ describe('demo activity planning', () => {
     expect(demoScoreMatchesPersona(0.2, null)).toBe(false)
     expect(demoScoreMatchesPersona(0.8, 0.31)).toBe(false)
     expect(demoScoreMatchesPersona(0.5, null)).toBe(true)
+  })
+
+  it('separates an exhausted content-quality retry from an operational failure', () => {
+    expect(isExpectedDemoContentQualityFailure(
+      new DemoContentQualityError('Generated right demo post remained directionally inconsistent')
+    )).toBe(true)
+    expect(isExpectedDemoContentQualityFailure(new Error('OpenAI request failed'))).toBe(false)
   })
 
   it('recognizes mechanical demo-post openings instead of publishing them', () => {
