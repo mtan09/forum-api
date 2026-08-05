@@ -2,12 +2,23 @@ import * as Sentry from '@sentry/node'
 
 let initialized = false
 
+export function resolveSentryRelease(
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return (
+    env.SENTRY_RELEASE ||
+    env.RAILWAY_GIT_COMMIT_SHA ||
+    (env.RAILWAY_DEPLOYMENT_ID ? `railway:${env.RAILWAY_DEPLOYMENT_ID}` : '') ||
+    'forum-api@unknown'
+  )
+}
+
 export function initSentry() {
   if (initialized || !process.env.SENTRY_DSN) return
   Sentry.init({
     dsn: process.env.SENTRY_DSN,
     environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV ?? 'development',
-    release: process.env.SENTRY_RELEASE ?? process.env.RAILWAY_GIT_COMMIT_SHA,
+    release: resolveSentryRelease(),
     tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
     sendDefaultPii: false,
     beforeSend(event) {

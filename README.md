@@ -151,7 +151,7 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 - Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`; private feedback additionally requires `R2_FEEDBACK_BUCKET_NAME`
 - Email/public links: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`,
   `LEGAL_CONTACT_EMAIL`, `WEB_APP_URL`, and `PUBLIC_API_URL`
-- Observability: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`; App Store release testing remains blocked without working Sentry
+- Observability: `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE`; App Store release testing remains blocked without working Sentry. `SENTRY_RELEASE` is preferred when supplied, while Railway deployments fall back to the Git commit SHA or deployment ID so every captured event still has a release tag.
 
 The current production sender is
 `forum <accounts@updates.forumeveryside.com>`. Public support and privacy pages
