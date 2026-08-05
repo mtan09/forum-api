@@ -3,6 +3,12 @@ import pool from '../src/db'
 import { verifyPassword } from '../src/lib/auth'
 
 async function main() {
+  const legacyDemoPassword = process.env.RELEASE_LEGACY_DEMO_PASSWORD
+  if (!legacyDemoPassword) {
+    throw new Error(
+      'Set RELEASE_LEGACY_DEMO_PASSWORD only in the invoking shell to verify that the former shared demo credential was revoked'
+    )
+  }
   const schema = await pool.query(
     `SELECT
        to_regclass('public.moderation_audits') IS NOT NULL AS moderation_audits,
@@ -106,7 +112,7 @@ async function main() {
     throw new Error('Article bodies are not fully scrubbed or the derived-feature invariant is incomplete')
   }
   const johnPasswordWorks = john.rows[0]?.password_hash
-    ? await verifyPassword('password123', john.rows[0].password_hash)
+    ? await verifyPassword(legacyDemoPassword, john.rows[0].password_hash)
     : false
   if (
     Number(john.rows[0]?.credentials ?? 0) !== 1 ||

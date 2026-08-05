@@ -13,10 +13,12 @@ const ai = new Hono<AppEnv>()
 
 // The model writes all three perspectives in one pass, separated by these
 // markers, so the reply can stream token-by-token — structured JSON output
-// can't do that cleanly (every token arrives inside an escaped string).
+// can't do that cleanly (every token arrives inside an escaped string). It
+// reasons from the center first, then contrasts left and right with that
+// baseline; the client remains free to display the cards left/center/right.
 const LEANS = ['left', 'center', 'right'] as const
 type Lean = (typeof LEANS)[number]
-const MARKERS = ['===LEFT===', '===CENTER===', '===RIGHT==='] as const
+const MARKERS = ['===CENTER===', '===LEFT===', '===RIGHT==='] as const
 const MARKER_RE = /===(LEFT|CENTER|RIGHT)===/gi
 
 const MAX_HISTORY_TURNS = 8
@@ -24,7 +26,7 @@ const MAX_TURN_CHARS = 2000
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-function splitSections(buf: string): Record<Lean, string> {
+export function splitSections(buf: string): Record<Lean, string> {
   const out: Record<Lean, string> = { left: '', center: '', right: '' }
   const found: { key: Lean; end: number; start: number }[] = []
   let m: RegExpExecArray | null
@@ -62,15 +64,15 @@ type ChatTurn = { role: 'user' | 'assistant'; content: string }
 
 // Replay prior turns; assistant turns go back in the same marker format the
 // model produces, which doubles as a format example.
-function historyToMessages(history: HistoryItem[]): ChatTurn[] {
+export function historyToMessages(history: HistoryItem[]): ChatTurn[] {
   return history.slice(-MAX_HISTORY_TURNS).flatMap((h): ChatTurn[] => {
     if (h.role === 'user' && h.content) {
       return [{ role: 'user' as const, content: String(h.content).slice(0, MAX_TURN_CHARS) }]
     }
     if (h.role === 'assistant' && (h.left || h.center || h.right)) {
       const content = [
-        `===LEFT===\n${String(h.left ?? '').slice(0, MAX_TURN_CHARS)}`,
         `===CENTER===\n${String(h.center ?? '').slice(0, MAX_TURN_CHARS)}`,
+        `===LEFT===\n${String(h.left ?? '').slice(0, MAX_TURN_CHARS)}`,
         `===RIGHT===\n${String(h.right ?? '').slice(0, MAX_TURN_CHARS)}`,
       ].join('\n')
       return [{ role: 'assistant' as const, content }]
@@ -79,14 +81,25 @@ function historyToMessages(history: HistoryItem[]): ChatTurn[] {
   })
 }
 
-const systemPrompt = (framing: string, subjectBlock: string | null, coverageBlock: string) =>
-  `You are forumAI, the assistant inside a political discussion app. For each user question, produce three self-contained answers to the same question: one as a thoughtful person on the political left would frame it, one as a political centrist would, and one as a thoughtful person on the political right would. Each answer should present that perspective's strongest good-faith reasoning — never a caricature — and note where the perspectives agree.
+export const buildForumAiSystemPrompt = (
+  framing: string,
+  subjectBlock: string | null,
+  coverageBlock: string
+) =>
+  `You are forumAI, the assistant inside a political discussion app. For each user question, produce three self-contained, good-faith answers: Center first as the factual and practical baseline, then Left and Right in meaningful contrast with it. Keep the underlying facts consistent across all three. Never manufacture a disagreement when the question is not meaningfully ideological, but do not merely paraphrase one conclusion three times when reasonable political differences exist.
+
+Use these lenses selectively, according to the actual issue:
+- Center: emphasize evidence, feasibility, institutional process, implementation, competing tradeoffs, and workable compromise. Center is not an arithmetic midpoint and should take a position when the evidence supports one.
+- Left: emphasize equality, civil and human rights, worker or consumer power, distributional consequences, public responsibility, and checks on concentrated private power. Make clear which costs, power imbalances, or affected groups the centrist baseline may underweight.
+- Right: emphasize individual liberty, public order and security, markets and incentives, tradition, local authority, national interest, and limits on government power. Make clear which constraints, unintended consequences, or responsibilities the centrist baseline may underweight.
+
+When a real policy disagreement exists, each answer should communicate its core diagnosis, highest priority, preferred action, and the tradeoff it is most willing to accept. The preferred actions or reasons should differ substantively where the perspectives genuinely differ. Do not use party slogans, stereotypes, or different factual standards for different perspectives. Put genuine common ground primarily in the Center answer instead of repeating the same agreement in every section.
 
 Format your reply as exactly three sections in this order, each opened by its marker alone on a line:
-===LEFT===
-(the left-leaning answer)
 ===CENTER===
 (the centrist answer)
+===LEFT===
+(the left-leaning answer)
 ===RIGHT===
 (the right-leaning answer)
 Never use those marker strings anywhere else in your text.
@@ -201,7 +214,10 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
         reasoning_effort: 'medium',
         stream: true,
         messages: [
-          { role: 'system', content: systemPrompt(framing, subject?.block ?? null, coverage) },
+          {
+            role: 'system',
+            content: buildForumAiSystemPrompt(framing, subject?.block ?? null, coverage),
+          },
           ...historyToMessages(history),
           { role: 'user', content: message },
         ],

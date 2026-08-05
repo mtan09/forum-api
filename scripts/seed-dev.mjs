@@ -5,6 +5,12 @@
 // and posts are skipped if that user already has posts.
 
 const API = process.env.API_URL ?? 'http://localhost:3000'
+const DEV_SEED_PASSWORD = process.env.FORUM_DEV_SEED_PASSWORD
+
+if (!DEV_SEED_PASSWORD || DEV_SEED_PASSWORD.length < 6) {
+  console.error('Set FORUM_DEV_SEED_PASSWORD (at least 6 characters) in your gitignored local environment.')
+  process.exit(1)
+}
 
 const TOPICS = {
   elections: '8c4a1a64-d3b6-4eb2-b86c-d9af397cdb1e',
@@ -17,9 +23,9 @@ const TOPICS = {
 }
 
 const USERS = [
-  { username: 'John Doe', email: 'john@example.dev', password: 'password123' },
-  { username: 'Jane Smith', email: 'jane@example.dev', password: 'password123' },
-  { username: 'Alice Johnson', email: 'alice@example.dev', password: 'password123' },
+  { username: 'John Doe', email: 'john@example.dev', password: DEV_SEED_PASSWORD },
+  { username: 'Jane Smith', email: 'jane@example.dev', password: DEV_SEED_PASSWORD },
+  { username: 'Alice Johnson', email: 'alice@example.dev', password: DEV_SEED_PASSWORD },
 ]
 
 // Adapted from mockPosts.ts — same authors/positions, on-topic text
@@ -121,4 +127,4 @@ if (alreadySeeded) {
   console.log('✓ votes')
 }
 
-console.log('\nDone. Log in as e.g. john@example.dev / password123')
+console.log('\nDone. Log in as john@example.dev with your configured FORUM_DEV_SEED_PASSWORD.')

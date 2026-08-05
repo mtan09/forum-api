@@ -10,7 +10,12 @@ import { readFileSync } from 'node:fs'
 // Usage: node scripts/seed-expand.mjs   (server must be running)
 
 const API = process.env.API_URL || 'http://localhost:3000'
-const PASSWORD = 'password123'
+const PASSWORD = process.env.FORUM_DEV_SEED_PASSWORD
+
+if (!PASSWORD || PASSWORD.length < 6) {
+  console.error('Set FORUM_DEV_SEED_PASSWORD (at least 6 characters) in your gitignored local environment.')
+  process.exit(1)
+}
 const STANCE_POSTS = JSON.parse(
   readFileSync(new URL('./stance-posts.json', import.meta.url), 'utf8')
 )

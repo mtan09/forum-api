@@ -7,6 +7,12 @@
 // Usage: node scripts/seed-community.mjs   (server must be running)
 
 const API = process.env.API_URL || 'http://localhost:3000'
+const PASSWORD = process.env.FORUM_DEV_SEED_PASSWORD
+
+if (!PASSWORD || PASSWORD.length < 6) {
+  console.error('Set FORUM_DEV_SEED_PASSWORD (at least 6 characters) in your gitignored local environment.')
+  process.exit(1)
+}
 
 const USERS = [
   // avatar portraits from randomuser.me (stable, hotlinkable)
@@ -22,8 +28,6 @@ const USERS = [
   { username: 'Sam Whitfield',   email: 'sam@example.dev',     avatar: 'https://randomuser.me/api/portraits/men/52.jpg' },
   { username: 'Grace Lindqvist', email: 'grace@example.dev',   avatar: 'https://randomuser.me/api/portraits/women/33.jpg' },
 ]
-const PASSWORD = 'password123'
-
 // user = index into USERS. Mix of partisan and neutral voices.
 const POSTS = [
   { user: 3, hashtags: ['border', 'immigration'],
