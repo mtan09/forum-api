@@ -5,7 +5,7 @@ import { semanticEmbedding } from '../recommendation/semantic'
 import { scorePost } from '../scoring/score'
 import { captureException } from '../lib/sentry'
 import { demoBio, DEMO_PERSONAS, type DemoPersona } from './personas'
-import { generateDemoComment, generateDemoPost, generateFallbackDemoPost } from './generate'
+import { generateDemoComment, generateDemoPost } from './generate'
 
 export type DemoActivityKind =
   | 'post'
@@ -457,42 +457,23 @@ async function personaForJob(userId: string): Promise<DemoPersona | null> {
 
 async function createPost(job: ActivityJob, persona: DemoPersona): Promise<void> {
   const expected = demoPerspective(persona.lean)
-  let generated: Awaited<ReturnType<typeof generateDemoPost>>
-  let score: ReturnType<typeof scorePost>
-  let fallbackUsed = false
-
-  try {
-    generated = await generateDemoPost(persona)
-    score = scorePost(generated.text)
-    if (!demoScoreMatchesPersona(persona.lean, score.position)) {
-      const observed = score.position == null
-        ? 'the wording did not express a classifiable policy stance'
-        : `the wording read as ${score.position < 0.5 ? 'left' : 'right'} rather than ${expected}`
-      generated = await generateDemoPost(
-        persona,
-        `${observed}. Rewrite around one explicit policy the persona supports or opposes. Preserve nuance and natural language.`
-      )
-      score = scorePost(generated.text)
-    }
-  } catch (error) {
-    console.warn(
-      `[demo] generated post unavailable for ${persona.username}; using moderated fallback:`,
-      error instanceof Error ? error.message : String(error)
-    )
-    generated = await generateFallbackDemoPost(persona)
-    score = scorePost(generated.text)
-    fallbackUsed = true
-  }
+  let generated = await generateDemoPost(persona)
+  let score = scorePost(generated.text)
 
   if (!demoScoreMatchesPersona(persona.lean, score.position)) {
-    if (!fallbackUsed) {
-      generated = await generateFallbackDemoPost(persona)
-      score = scorePost(generated.text)
-      fallbackUsed = true
-    }
-    if (!demoScoreMatchesPersona(persona.lean, score.position)) {
-      throw new Error(`Fallback ${expected} demo post remained directionally inconsistent`)
-    }
+    const observed = score.position == null
+      ? 'the wording did not express a classifiable policy stance'
+      : `the wording read as ${score.position < 0.5 ? 'left' : 'right'} rather than ${expected}`
+    generated = await generateDemoPost(
+      persona,
+      `${observed}. Rewrite around one explicit policy the persona supports or opposes. Preserve nuance and natural language.`
+    )
+    score = scorePost(generated.text)
+  }
+  if (!demoScoreMatchesPersona(persona.lean, score.position)) {
+    // Let the queued job retry with a fresh model generation. Publishing no
+    // post is preferable to filling the feed with a visible generic template.
+    throw new Error(`Generated ${expected} demo post remained directionally inconsistent`)
   }
   const topic = await matchTopic(`${generated.text} ${generated.hashtags.join(' ')}`)
   await query(

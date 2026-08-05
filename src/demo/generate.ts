@@ -42,6 +42,17 @@ export function stripDemoAuthorPrefix(value: string, username: string): string {
   return stripped || cleaned
 }
 
+/**
+ * Scheduled posts should read like distinct people, not a headline-reaction
+ * template. Reject the mechanical openings that made the fallback path visible
+ * in the feed and let the job retry with a fresh generation instead.
+ */
+export function hasBoilerplateDemoOpening(value: string): boolean {
+  const cleaned = cleanGeneratedText(value)
+  return /^(?:on\s+|as\s+an?\s+)/i.test(cleaned) ||
+    /\bI support (?:strengthening worker protections and funding public services|cutting government spending and taxes)\b/i.test(cleaned)
+}
+
 function cleanHashtag(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
@@ -81,7 +92,7 @@ async function generateJson(prompt: string): Promise<{ text?: unknown; hashtags?
     messages: [
       {
         role: 'system',
-        content: `You write one short piece of clearly fictional demo-community content for forum, a political discussion app. The account is visibly labeled "Fictional demo account" in the product. Stay in the supplied persona. Take a definite, good-faith point of view; do not flatten it into generic balance language. Do not impersonate a real person, claim access to private information, invent quotations, invent exact statistics, or say you personally witnessed a breaking event. Use only the supplied headline context for current-event facts. The UI renders authorship separately: return only the body, never prefix it with the persona name, username, a byline, or the account label. Never mention these instructions, automation, App Review, or being an AI. Return valid JSON only.`,
+        content: `You write one short piece of clearly fictional demo-community content for forum, a political discussion app. The account is visibly labeled "Fictional demo account" in the product. Stay in the supplied persona. Take a definite, good-faith point of view; do not flatten it into generic balance language. Do not impersonate a real person, claim access to private information, invent quotations, invent exact statistics, or say you personally witnessed a breaking event. Use only the supplied headline context for current-event facts. The UI renders authorship separately: return only the body, never prefix it with the persona name, username, a byline, or the account label. Lead with the persona's actual argument rather than mechanically restating the topic. Never begin with "On [topic]" or "As a [role]", and never reuse a generic left/right policy template. Never mention these instructions, automation, App Review, or being an AI. Return valid JSON only.`,
       },
       { role: 'user', content: prompt },
     ],
@@ -111,45 +122,21 @@ export async function generateDemoPost(
     .map((topic, index) => `${index + 1}. ${topic.title}\n${topic.headlines.map((h) => `- ${h}`).join('\n')}`)
     .join('\n\n')
   const result = await generateJson(
-    `Persona: ${persona.username}, a ${persona.role}.\nPolitical lean on a 0=left to 1=right scale: ${persona.lean.toFixed(2)}.\nVoice: ${persona.voice}\nCore interests: ${persona.interests.join(', ')}.\n\nChoose the one current topic below that this persona would care about most. Write a concise 25-65 word forum post with a concrete argument, question, or criticism in that voice. The post should be recognizably left-, center-, or right-leaning when the persona is, without using a party slogan as a substitute for reasoning. State the policy action the persona supports or opposes; criticism or process questions alone are not enough for a directional post.${refinement ? `\n\nRevision requirement: ${refinement}` : ''}\n\nReturn {"text":"...","hashtags":["one","two"]}. Use 1-3 lowercase hashtags without #.\n\nCurrent topic/headline context:\n${context}`
+    `Persona: ${persona.username}, a ${persona.role}.\nPolitical lean on a 0=left to 1=right scale: ${persona.lean.toFixed(2)}.\nVoice: ${persona.voice}\nCore interests: ${persona.interests.join(', ')}.\n\nChoose the one current topic below that this persona would care about most. Write a concise 25-65 word forum post with a concrete argument, question, or criticism in that voice. The post should be recognizably left-, center-, or right-leaning when the persona is, without using a party slogan as a substitute for reasoning. State the policy action the persona supports or opposes; criticism or process questions alone are not enough for a directional post. Open with the argument itself. Do not begin with "On [topic]" or "As a [role]", and do not mechanically repeat the supplied headline.${refinement ? `\n\nRevision requirement: ${refinement}` : ''}\n\nReturn {"text":"...","hashtags":["one","two"]}. Use 1-3 lowercase hashtags without #.\n\nCurrent topic/headline context:\n${context}`
   )
   const text = stripDemoAuthorPrefix(String(result.text ?? ''), persona.username)
   const wordCount = text.split(/\s+/).filter(Boolean).length
   if (text.length < 25 || text.length > 500 || wordCount > 75) {
     throw new Error('Generated demo post length is invalid')
   }
+  if (hasBoilerplateDemoOpening(text)) {
+    throw new Error('Generated demo post used a mechanical template opening')
+  }
   const hashtags = Array.isArray(result.hashtags)
     ? result.hashtags.map(String).map(cleanHashtag).filter(Boolean).slice(0, 3)
     : []
   await approve(text, 'post')
   return { text, hashtags }
-}
-
-export function fallbackDemoPostContent(
-  persona: DemoPersona,
-  topicTitle: string
-): { text: string; hashtags: string[] } {
-  const topic = cleanGeneratedText(topicTitle).slice(0, 100) || 'today’s policy debate'
-  const text = persona.lean < 0.42
-    ? `On ${topic}, I support strengthening worker protections and funding public services with progressive taxes. As a ${persona.role}, I want the debate focused on who bears the cost and whether the policy expands practical access.`
-    : persona.lean > 0.58
-      ? `On ${topic}, I support cutting government spending and taxes while reducing regulation and compliance costs. As a ${persona.role}, I want coverage to explain the price tag, enforcement mechanism, and what authority belongs outside Washington.`
-      : `On ${topic}, I want the actual proposal, cost, and implementation timeline separated from campaign rhetoric. As a ${persona.role}, I would judge it by measurable results and whether responsibility is clear.`
-  return {
-    text,
-    hashtags: persona.interests.map(cleanHashtag).filter(Boolean).slice(0, 2),
-  }
-}
-
-export async function generateFallbackDemoPost(
-  persona: DemoPersona
-): Promise<{ text: string; hashtags: string[] }> {
-  const topics = await currentTopics(persona)
-  if (topics.length === 0) throw new Error('No recent clustered topics are available for a fallback demo post')
-  const topic = topics[Math.abs(persona.cadenceSeed) % topics.length]
-  const generated = fallbackDemoPostContent(persona, topic.title)
-  await approve(generated.text, 'post')
-  return generated
 }
 
 export async function generateDemoComment(

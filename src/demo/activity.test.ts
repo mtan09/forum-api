@@ -9,7 +9,7 @@ import {
   demoVoteDirection,
   scheduledOffsetMinutes,
 } from './activity'
-import { fallbackDemoPostContent, stripDemoAuthorPrefix } from './generate'
+import { hasBoilerplateDemoOpening, stripDemoAuthorPrefix } from './generate'
 import { scorePost } from '../scoring/score'
 
 describe('demo activity planning', () => {
@@ -80,22 +80,12 @@ describe('demo activity planning', () => {
     expect(demoScoreMatchesPersona(0.5, null)).toBe(true)
   })
 
-  it('has concise deterministic fallback posts that the stance scorer recognizes', () => {
-    const base = {
-      username: 'Fixture',
-      role: 'local organizer',
-      voice: 'Direct and practical.',
-      interests: ['economy', 'government'],
-      cadenceSeed: 1,
-    }
-    for (const lean of [0.2, 0.8]) {
-      const generated = fallbackDemoPostContent({ ...base, lean }, 'A current policy story')
-      const words = generated.text.split(/\s+/).filter(Boolean).length
-      const score = scorePost(generated.text)
-      expect(words).toBeGreaterThanOrEqual(25)
-      expect(words).toBeLessThanOrEqual(65)
-      expect(demoScoreMatchesPersona(lean, score.position)).toBe(true)
-    }
+  it('recognizes mechanical demo-post openings instead of publishing them', () => {
+    expect(hasBoilerplateDemoOpening('On a current policy story, I support lower taxes.')).toBe(true)
+    expect(hasBoilerplateDemoOpening('As a local organizer, I want a clearer vote.')).toBe(true)
+    expect(hasBoilerplateDemoOpening(
+      'The committee should publish a cost estimate before advancing the bill.'
+    )).toBe(false)
   })
 
   it('removes duplicated demo authorship only when it is a leading byline', () => {

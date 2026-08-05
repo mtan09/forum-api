@@ -34,9 +34,11 @@ article. A directional persona's post is also run
 through the same content-only spectrum classifier as a real post. If its actual
 argument is unclassified or points the opposite way, the generator gets one
 natural rewrite attempt around a concrete supported or opposed policy. If the
-rewrite remains inconsistent, a short deterministic, moderated persona/topic
-fallback preserves the posting cadence. Persona lean validates the fixture but
-is never copied into the stored score. Posts are stored with
+rewrite remains inconsistent, the durable job retries with a fresh generation;
+after its bounded attempts, that post is omitted instead of publishing generic
+filler. Mechanical openings such as `On [headline]` and `As a [role]` are
+rejected before storage. Persona lean validates the fixture but is never copied
+into the stored score. Posts are stored with
 `is_demo_generated = true` and a unique `demo_job_id`. Votes are idempotent
 upserts. The worker never uses demo-account passwords and sends no notification
 for its direct database writes.
