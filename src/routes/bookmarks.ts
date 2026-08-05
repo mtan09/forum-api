@@ -47,7 +47,8 @@ bookmarks.get('/', requireAuth, async (c) => {
   const [posts, articles] = await Promise.all([
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
-              p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+              p.position_confidence, p.position_signals, p.scorer_version,
+              p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
               u.username, u.avatar_url, u.is_demo,
               v.direction AS my_vote,
               TRUE AS my_bookmark,
@@ -63,7 +64,8 @@ bookmarks.get('/', requireAuth, async (c) => {
       `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
          a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
          a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
-         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, v.direction AS my_vote, TRUE AS my_bookmark, b.created_at AS saved_at
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
+         a.ai_context_allowed, v.direction AS my_vote, TRUE AS my_bookmark, b.created_at AS saved_at
        FROM bookmarks b
        JOIN articles a ON a.id = b.article_id
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1

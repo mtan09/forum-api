@@ -445,7 +445,8 @@ users.get('/me/posts', requireAuth, async (c) => {
   const userId = c.get('userId')
   const result = await query(
     `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
-            p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+            p.position_confidence, p.position_signals, p.scorer_version,
+            p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
             u.username, u.avatar_url, u.is_demo,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
@@ -486,7 +487,8 @@ users.get('/me/upvoted', requireAuth, async (c) => {
   const [posts, articles] = await Promise.all([
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
-              p.position_confidence, p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+              p.position_confidence, p.position_signals, p.scorer_version,
+              p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
               u.username, u.avatar_url, u.is_demo,
               'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
@@ -501,7 +503,8 @@ users.get('/me/upvoted', requireAuth, async (c) => {
       `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
          a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
          a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
-         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at, 'up' AS my_vote,
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
+         a.ai_context_allowed, 'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
               v.created_at AS voted_at
        FROM article_votes v
@@ -531,6 +534,10 @@ users.delete('/me', requireAuth, async (c) => {
        VALUES ($1, $2, $3)`,
       [userId, `${userId}/`, `feedback/${userId}/`]
     )
+    // Delete feedback text, device metadata, notes, and stale screenshot keys
+    // immediately. The queued job above removes the screenshot bytes from the
+    // private bucket independently, with retries if storage is unavailable.
+    await client.query('DELETE FROM beta_feedback WHERE user_id = $1', [userId])
     await client.query('DELETE FROM userdata WHERE id = $1', [userId])
     await client.query('COMMIT')
   } catch (err) {

@@ -66,7 +66,8 @@ topics.get('/subtopics/:id', async (c) => {
       `SELECT id, url, title, source, media, political_lean,
          political_relevance, lean_confidence, content_type, lean_signals,
          source_lean, scorer_version, upvotes, downvotes, commentcount,
-         general_topic_id, subtopic_id, published_at, status, created_at FROM articles WHERE subtopic_id = $1 AND status = 'ready'
+         general_topic_id, subtopic_id, published_at, status, created_at,
+         ai_context_allowed FROM articles WHERE subtopic_id = $1 AND status = 'ready'
        ORDER BY published_at DESC NULLS LAST`,
       [id]
     )

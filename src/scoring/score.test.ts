@@ -1,9 +1,33 @@
 import { describe, expect, it } from 'vitest'
+import { POST_SCORING_EVALUATION } from './evaluation-corpus'
 import { scorePost, scoreArticle, SCORER_VERSION } from './score'
 
 // The scorer is the app's core promise: deterministic, no black box.
 // These tests pin that promise down.
 describe('scorePost', () => {
+  it('meets the reviewed corpus coverage and false-placement thresholds', () => {
+    const band = (position: number | null) => {
+      if (position == null) return 'unclassified'
+      if (position < 0.45) return 'left'
+      if (position > 0.55) return 'right'
+      return 'center'
+    }
+    const results = POST_SCORING_EVALUATION.map((entry) => ({
+      expected: entry.label,
+      actual: band(scorePost(entry.text).position),
+    }))
+    const directional = results.filter((entry) => entry.expected === 'left' || entry.expected === 'right')
+    const directionalMatches = directional.filter((entry) => entry.actual === entry.expected).length
+    const neutral = results.filter((entry) => entry.expected === 'unclassified')
+    const falsePlacements = neutral.filter((entry) => entry.actual !== 'unclassified').length
+    const center = results.filter((entry) => entry.expected === 'center')
+    const centerMatches = center.filter((entry) => entry.actual === 'center').length
+
+    expect(directionalMatches / directional.length).toBeGreaterThanOrEqual(0.9)
+    expect(centerMatches / center.length).toBeGreaterThanOrEqual(2 / 3)
+    expect(falsePlacements / neutral.length).toBeLessThanOrEqual(0.05)
+  })
+
   it('is deterministic — same text, same placement, always', () => {
     const text =
       'The estate tax debate returns as Congress weighs undocumented immigrant protections.'
@@ -51,6 +75,60 @@ describe('scorePost', () => {
     expect(result.signals).toContain(
       'stance-right:"immigration · stricter border enforcement"×1'
     )
+  })
+
+  it('recognizes compositional labor language from a natural demo post', () => {
+    const result = scorePost(
+      'Who is guaranteeing union labor standards and apprenticeship slots before the rebuilding plan moves forward?'
+    )
+    expect(result.position).not.toBeNull()
+    expect(result.position).toBeLessThan(0.4)
+    expect(result.signals.some((signal) =>
+      signal.startsWith('stance-meta:') && signal.includes('compositional')
+    )).toBe(true)
+  })
+
+  it('recognizes local prototype paraphrases without sending text to a model', () => {
+    const result = scorePost(
+      'We should regulate carbon pollution and fossil fuels instead of accepting another decade of delay.'
+    )
+    expect(result.position).not.toBeNull()
+    expect(result.position).toBeLessThan(0.4)
+    expect(result.signals.some((signal) =>
+      signal.startsWith('stance-meta:') && signal.includes('prototype')
+    )).toBe(true)
+  })
+
+  it('recognizes investment in local public-health capacity', () => {
+    const result = scorePost(
+      'The next administration should fund ventilation upgrades, contact tracing capacity, and transparent data sharing with counties.'
+    )
+    expect(result.position).not.toBeNull()
+    expect(result.position).toBeLessThan(0.4)
+  })
+
+  it('does not score a third-party position that the author expressly disclaims', () => {
+    const result = scorePost(
+      'A reporter said the governor wants to expand domestic oil production, but I have not taken a position.'
+    )
+    expect(result.position).toBeNull()
+  })
+
+  it('does not treat opposition to a left proposal as support for that proposal', () => {
+    const result = scorePost(
+      'I oppose the proposal to strengthen union labor standards because employers cannot absorb another mandate.'
+    )
+    expect(result.position == null || result.position >= 0.5).toBe(true)
+    expect(result.signals.some((signal) =>
+      signal.startsWith('stance-left:')
+    )).toBe(false)
+  })
+
+  it('leaves non-directional institutional accountability questions unclassified', () => {
+    const result = scorePost(
+      'Congress should demand a public audit, publish the chain of command, and explain who approved the fund.'
+    )
+    expect(result.position).toBeNull()
   })
 
   it('does not mistake analysis mentioning strict voter-ID states for support', () => {

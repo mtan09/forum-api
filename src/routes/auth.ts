@@ -110,9 +110,6 @@ auth.post('/signup', signupLimit, async (c) => {
     await client.query('COMMIT')
 
     const token = await issueToken(userId)
-    // Fire-and-forget so a slow mail provider never delays signup
-    sendVerification(userId, email, publicApiOrigin(c.req.raw))
-      .catch((err) => console.error('[email] verification send failed:', err?.message))
     return c.json(
       {
         token,
@@ -232,7 +229,9 @@ auth.get('/verify', async (c) => {
   return page('Email verified ✓', 'You can close this page and head back to the app.', true)
 })
 
-// POST /auth/resend-verification — authed; re-sends the link
+// POST /auth/resend-verification — authed; creates the first verification
+// link when onboarding reaches its verification step, then replaces it on
+// explicit resend. Signup itself intentionally sends no email.
 auth.post(
   '/resend-verification',
   requireAuth,

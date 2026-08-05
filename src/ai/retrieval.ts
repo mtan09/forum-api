@@ -1,11 +1,11 @@
 // Grounding context for forumAI — deterministic retrieval over the app's
-// own ingested articles. No embeddings, no external search: the same
-// keyword machinery that drives hashtags and clustering ranks recent
-// articles against the question. Every output here is clamped hard so the
-// prompt can never balloon no matter how big the corpus gets.
+// own article index. No embeddings, no external search: the same bounded
+// keyword profiles that drive clustering rank recent eligible headlines
+// against the question. Publisher bodies are neither stored nor placed in a
+// prompt. Every output here is clamped hard so the prompt cannot balloon.
 
 import { query } from '../db'
-import { extractKeywords, keywordSimilarity, type Keywords } from '../ingest/keywords'
+import { extractKeywords, keywordSimilarity, restoreKeywords, type Keywords } from '../ingest/keywords'
 
 const RECENT_DAYS = 14
 const CANDIDATE_LIMIT = 400
@@ -23,15 +23,20 @@ export type CoverageIntent = 'top_story' | 'latest' | 'relevance'
 // corpus's own hot-story index or newest coverage instead of returning an
 // empty context block.
 export function coverageIntent(text: string): CoverageIntent {
-  const normalized = text.toLowerCase().replace(/[’]/g, "'")
+  const normalized = text.toLowerCase().replace(/[’]/g, "'").replace(/\s+/g, ' ').trim()
   if (
     /\b(?:biggest|top|main|most important|leading) (?:news )?(?:story|stories|headline|headlines)\b/.test(normalized) ||
-    /\bwhat(?:'s| is) the (?:biggest|top|main) story\b/.test(normalized)
+    /\bwhat(?:'s| is) the (?:biggest|top|main) story\b/.test(normalized) ||
+    /\bwhich (?:political |policy )?(?:topic|issue|debate) matters? most(?: right now| today)?\b/.test(normalized)
   ) return 'top_story'
   if (
     /\b(?:today's|todays|latest|current) (?:news|headlines|stories|events)\b/.test(normalized) ||
     /\bwhat(?:'s| is) (?:happening|in the news) today\b/.test(normalized) ||
-    /\b(?:news|headline) roundup\b/.test(normalized)
+    /\b(?:news|headline) roundup\b/.test(normalized) ||
+    /\b(?:hot|hottest|trending|top|biggest|leading|major) (?:political |policy |news )?(?:topics?|issues?|debates?)\b/.test(normalized) ||
+    /\bwhat (?:are|is) (?:the )?(?:hot|hottest|trending|top|biggest|leading|major) (?:political |policy |news )?(?:topics?|issues?|debates?)\b/.test(normalized) ||
+    /\bwhat(?:'s| is) trending(?: in (?:politics|the news))?(?: today| right now)?\b/.test(normalized) ||
+    /\btoday's (?:political |news )?coverage\b/.test(normalized)
   ) return 'latest'
   return 'relevance'
 }
@@ -108,7 +113,8 @@ type ArticleRow = {
   source: string | null
   source_lean: number | null
   published_at: string | null
-  content: string | null
+  analysis_profile?: unknown
+  ai_context_allowed?: boolean
   subtopic_id?: string | null
 }
 
@@ -121,7 +127,7 @@ type StoryRow = {
 }
 
 function articleLine(a: ArticleRow): string {
-  return `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}: ${clamp(a.content ?? '', LEAD_CLAMP)}`
+  return `- "${clamp(a.title ?? '', TITLE_CLAMP)}" — ${a.source} (${leanLabel(a.source_lean)}), ${day(a.published_at)}`
 }
 
 function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] {
@@ -157,9 +163,9 @@ function selectDiverseArticles(rows: ArticleRow[], limit: number): ArticleRow[] 
 
 async function latestCoverage(excludeId?: string | null): Promise<string> {
   const result = await query(
-    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+    `SELECT id, title, source, source_lean, published_at, analysis_profile, subtopic_id
      FROM articles
-     WHERE status = 'ready' AND title IS NOT NULL
+     WHERE status = 'ready' AND title IS NOT NULL AND ai_context_allowed
        AND id <> COALESCE($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
        AND COALESCE(published_at, created_at) > NOW() - INTERVAL '3 days'
      ORDER BY published_at DESC NULLS LAST
@@ -185,9 +191,10 @@ async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): 
   if (stories.length === 0) return latestCoverage(excludeId)
 
   const articleResult = await query(
-    `SELECT id, title, source, source_lean, published_at, content, subtopic_id
+    `SELECT id, title, source, source_lean, published_at, analysis_profile, subtopic_id
      FROM articles
-     WHERE status = 'ready' AND subtopic_id = ANY($1::uuid[])
+     WHERE status = 'ready' AND ai_context_allowed
+       AND subtopic_id = ANY($1::uuid[])
        AND id <> COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
      ORDER BY published_at DESC NULLS LAST`,
     [stories.map((story) => story.id), excludeId ?? null]
@@ -198,15 +205,16 @@ async function hotStoryCoverage(topicLimit: number, excludeId?: string | null): 
   let budget = COVERAGE_CLAMP
 
   for (const story of stories) {
-    const storyLine = `Corpus story: "${clamp(story.title, TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, LEAD_CLAMP)}` : ''}`
-    if (storyLine.length + 1 > budget) break
-    lines.push(storyLine)
-    budget -= storyLine.length + 1
-
     const storyArticles = selectDiverseArticles(
       articles.filter((article) => article.subtopic_id === story.id),
       Math.max(1, Math.min(3, remainingArticles))
     )
+    if (storyArticles.length === 0) continue
+    const storyLine = `Corpus story: "${clamp(storyArticles[0].title ?? '', TITLE_CLAMP)}" (${story.volume} related items, hot-story score ${Number(story.score).toFixed(1)})${story.short_summary ? ` — ${clamp(story.short_summary, LEAD_CLAMP)}` : ''}`
+    if (storyLine.length + 1 > budget) break
+    lines.push(storyLine)
+    budget -= storyLine.length + 1
+
     for (const article of storyArticles) {
       const line = articleLine(article)
       if (line.length + 1 > budget) break
@@ -227,9 +235,9 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   if (qk.terms.size === 0) return ''
 
   const result = await query(
-    `SELECT id, title, source, source_lean, published_at, content
+    `SELECT id, title, source, source_lean, published_at, analysis_profile
      FROM articles
-     WHERE status = 'ready' AND title IS NOT NULL
+     WHERE status = 'ready' AND title IS NOT NULL AND ai_context_allowed
        AND COALESCE(published_at, created_at) > NOW() - INTERVAL '${RECENT_DAYS} days'
      ORDER BY published_at DESC NULLS LAST
      LIMIT ${CANDIDATE_LIMIT}`
@@ -245,7 +253,7 @@ export async function relatedCoverage(seedText: string, excludeId?: string | nul
   const scored = (result.rows as ArticleRow[])
     .filter((a) => a.id !== excludeId)
     .map((a) => {
-      const profile = extractKeywords(a.title ?? '', a.content ?? '', 400)
+      const profile = restoreKeywords(a.analysis_profile, a.title ?? '')
       const { roots, bigram } = sharedConcepts(qk, profile)
       return { a, roots, bigram, sim: keywordSimilarity(qk, profile) }
     })
@@ -292,21 +300,23 @@ export async function corpusCoverage(
 // The item the user is looking at when they tap "Ask forumAI" — becomes a
 // pinned block in the system prompt plus seed text for coverage retrieval.
 export type Subject = { block: string; seed: string }
+export type ArticleSubjectResult = { subject: Subject | null; blocked: boolean }
 
-export async function articleSubject(articleId: string): Promise<Subject | null> {
+export async function articleSubject(articleId: string): Promise<ArticleSubjectResult> {
   const result = await query(
-    'SELECT id, title, source, source_lean, published_at, content FROM articles WHERE id = $1',
+    `SELECT id, title, source, source_lean, published_at, ai_context_allowed
+     FROM articles WHERE id = $1`,
     [articleId]
   )
   const a = result.rows[0] as ArticleRow | undefined
-  if (!a) return null
+  if (!a) return { subject: null, blocked: false }
+  if (!a.ai_context_allowed) return { subject: null, blocked: true }
   const block = [
-    'The user is currently viewing this news article; unless they clearly ask about something else, treat their questions as being about it:',
+    'The user is currently viewing this attributed publisher headline; unless they clearly ask about something else, treat their questions as being about it:',
     `Title: ${clamp(a.title ?? 'Untitled', TITLE_CLAMP)}`,
     `Source: ${a.source} (${leanLabel(a.source_lean)}) — published ${day(a.published_at)}`,
-    `Excerpt: ${clamp(a.content ?? '', SUBJECT_CLAMP)}`,
   ].join('\n')
-  return { block, seed: `${a.title ?? ''} ${(a.content ?? '').slice(0, 400)}` }
+  return { subject: { block, seed: a.title ?? '' }, blocked: false }
 }
 
 export async function postSubject(postId: string): Promise<Subject | null> {

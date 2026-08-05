@@ -139,6 +139,7 @@ search.get('/', requireAuth, async (c) => {
   const [posts, postCount, articles, articleCount] = await Promise.all([
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
+              p.position_confidence, p.position_signals, p.scorer_version,
               p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
               u.username, u.avatar_url, u.is_demo,
               v.direction AS my_vote,
@@ -169,6 +170,7 @@ search.get('/', requireAuth, async (c) => {
               a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
               a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
               a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
+              a.ai_context_allowed,
               v.direction AS my_vote,
               EXISTS(
                 SELECT 1 FROM bookmarks b

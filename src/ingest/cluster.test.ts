@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { leadOf, spectrumSummary, type ArticleRow } from './cluster'
+import { articleKeywordProfile, leadOf, spectrumSummary, type ArticleRow } from './cluster'
+import {
+  extractKeywords,
+  keywordSimilarity,
+  restoreKeywords,
+  STORED_KEYWORD_TERM_LIMIT,
+  storeKeywords,
+} from './keywords'
 
 const article = (content: string, title = 'A concise article headline'): ArticleRow => ({
   id: 'article-1',
@@ -51,7 +58,7 @@ describe('spectrumSummary', () => {
     }
     const center = {
       ...article(
-        'Another publisher body sentence that is private analysis input only.',
+        'Another publisher body sentence that is transient analysis input only.',
         'Senate schedules a vote on the war-powers resolution'
       ),
       id: 'center',
@@ -74,7 +81,44 @@ describe('spectrumSummary', () => {
     expect(summary).toContain('From the center (Center Example): Senate schedules')
     expect(summary).toContain('From the right (Right Example): Republicans defend')
     expect(summary).not.toContain('publisher article')
-    expect(summary).not.toContain('private analysis input')
+    expect(summary).not.toContain('transient analysis input')
     expect(summary).not.toContain('full-text sentence')
+  })
+})
+
+describe('transient article analysis', () => {
+  it('round-trips a bounded profile without storing article prose', () => {
+    const body =
+      'Congressional negotiators debated semiconductor export controls and supply-chain security. ' +
+      'The proposal would change licensing rules for advanced chips while funding domestic manufacturing.'
+    const stored = storeKeywords(extractKeywords('Senators debate semiconductor export controls', body))
+
+    expect(stored.terms.length).toBeLessThanOrEqual(STORED_KEYWORD_TERM_LIMIT)
+    expect(JSON.stringify(stored)).not.toContain(body)
+    expect(articleKeywordProfile({ ...article('', 'Senators debate semiconductor export controls'), analysis_profile: stored }).top)
+      .toEqual(restoreKeywords(stored).top)
+  })
+
+  it('preserves same-story similarity while separating unrelated coverage', () => {
+    const firstOriginal = extractKeywords(
+      'Senate advances semiconductor export-control bill',
+      'Lawmakers debated chip licensing, advanced processors, China exports, and domestic manufacturing funding.'
+    )
+    const secondOriginal = extractKeywords(
+      'Senate advances semiconductor export-control legislation',
+      'The semiconductor export-control proposal changes chip licensing for advanced processors and domestic manufacturing.'
+    )
+    const unrelatedOriginal = extractKeywords(
+      'Coastal states prepare for a major hurricane',
+      'Emergency managers issued evacuation routes as the storm approached homes near the Atlantic coast.'
+    )
+    const first = restoreKeywords(storeKeywords(firstOriginal))
+    const second = restoreKeywords(storeKeywords(secondOriginal))
+    const unrelated = restoreKeywords(storeKeywords(unrelatedOriginal))
+
+    expect(keywordSimilarity(firstOriginal, secondOriginal)).toBeGreaterThanOrEqual(0.3)
+    expect(keywordSimilarity(firstOriginal, unrelatedOriginal)).toBeLessThan(0.3)
+    expect(keywordSimilarity(first, second)).toBeGreaterThanOrEqual(0.3)
+    expect(keywordSimilarity(first, unrelated)).toBeLessThan(0.3)
   })
 })

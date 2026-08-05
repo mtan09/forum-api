@@ -53,15 +53,14 @@ share.get('/', (c) =>
         'A political discussion app where every post and article shows where it sits on the spectrum — scored transparently, no black box.',
       body: `<div class="card">
         <h2 style="margin-top:0">See the whole conversation.</h2>
-        <p>One feed with every side of the story: real news from ~59 outlets across the spectrum, community debate, daily stance rooms, and an AI that answers from the left, center, and right — every time.</p>
+        <p>One feed with every side of the story: real news from 58 outlets across the spectrum, community debate, daily stance rooms, and an AI that answers from the left, center, and right.</p>
       </div>`,
       deepLink: 'forum://',
     })
   )
 )
 
-// Public App Store support URL. This remains useful inside the beta even
-// before a branded domain is selected.
+// Public App Store support URL for users, reviewers, and rights holders.
 share.get('/support', (c) => {
   const email =
     process.env.SUPPORT_EMAIL ??
@@ -70,13 +69,14 @@ share.get('/support', (c) => {
   return c.html(
     page({
       title: 'forum support',
-      description: 'Account, beta, and troubleshooting help for forum.',
+      description: 'Account, feedback, rights, and troubleshooting help for forum.',
       body: `<div class="card">
         <h2 style="margin-top:0">How can we help?</h2>
-        <p><strong>Beta feedback:</strong> use Settings → Send Beta Feedback to include your app version and an optional screenshot, or use TestFlight’s Send Beta Feedback action after taking a screenshot.</p>
+        <p><strong>Feedback:</strong> use Settings → Send Feedback to include your app version and an optional screenshot. TestFlight testers can also use TestFlight’s feedback action after taking a screenshot.</p>
         <p><strong>Account deletion:</strong> open Settings → Delete Account. Your account data is removed immediately and associated media is cleared from active storage within 24 hours.</p>
         <p><strong>Login or email trouble:</strong> confirm you have a network connection, request one new verification/reset message, then check spam. Only the newest verification link or reset code remains valid.</p>
-        <p><strong>Crashes or blank screens:</strong> relaunch the app, note the screen and action that caused it, then send beta feedback. Include a screenshot when possible.</p>
+        <p><strong>Crashes or blank screens:</strong> relaunch the app, note the screen and action that caused it, then send feedback. Include a screenshot when possible.</p>
+        <p><strong>Publisher, photographer, or rights-holder requests:</strong> email us with the affected article or image URL and the correction or removal requested. We will investigate promptly and remove or correct challenged material when appropriate.</p>
         <p>Email: <a href="mailto:${esc(email)}">${esc(email)}</a></p>
         <p><a href="/legal/privacy">Privacy Policy</a> · <a href="/legal/terms">Terms of Service</a></p>
       </div>`,

@@ -78,7 +78,12 @@ CREATE TABLE IF NOT EXISTS articles (
   content_hash        TEXT UNIQUE,
   title               TEXT,
   source              TEXT,
-  content             TEXT,
+  -- Article text is transient analysis input and is never persisted. Keep the
+  -- legacy nullable column temporarily so old databases can migrate safely.
+  content             TEXT CHECK (content IS NULL),
+  analysis_profile    JSONB,
+  analysis_text       TEXT,
+  ai_context_allowed  BOOLEAN NOT NULL DEFAULT FALSE,
   media               TEXT,
   political_lean      FLOAT CHECK (political_lean BETWEEN 0 AND 1),
   political_relevance FLOAT CHECK (political_relevance BETWEEN 0 AND 1),
@@ -95,7 +100,7 @@ CREATE TABLE IF NOT EXISTS articles (
   published_at        TIMESTAMPTZ,
   status              TEXT DEFAULT 'ready' CHECK (status IN ('pending', 'ready')),
   search_tsv          TSVECTOR GENERATED ALWAYS AS
-                        (to_tsvector('english', coalesce(title, '') || ' ' || left(coalesce(content, ''), 20000))) STORED,
+                        (to_tsvector('english', coalesce(title, '') || ' ' || coalesce(analysis_text, ''))) STORED,
   created_at          TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -182,8 +187,9 @@ CREATE TABLE IF NOT EXISTS demo_personas (
 CREATE TABLE IF NOT EXISTS demo_activity_jobs (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
-  kind            TEXT NOT NULL CHECK (kind IN (
+                  kind            TEXT NOT NULL CHECK (kind IN (
                     'post', 'post_comment', 'post_vote',
+                    'article_comment', 'article_vote',
                     'debate_comment', 'debate_vote', 'comment_vote'
                   )),
   target_id       TEXT,
@@ -337,7 +343,7 @@ CREATE INDEX IF NOT EXISTS idx_moderation_audits_review
 
 CREATE TABLE IF NOT EXISTS beta_feedback (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id TEXT REFERENCES userdata(id) ON DELETE SET NULL,
+  user_id TEXT REFERENCES userdata(id) ON DELETE CASCADE,
   category TEXT NOT NULL CHECK (
     category IN ('bug', 'ui', 'performance', 'content', 'idea', 'other')
   ),
@@ -505,6 +511,8 @@ CREATE INDEX IF NOT EXISTS idx_articles_topic   ON articles(general_topic_id);
 CREATE INDEX IF NOT EXISTS idx_articles_status  ON articles(status);
 CREATE INDEX IF NOT EXISTS idx_articles_created ON articles(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_tsv      ON articles USING GIN (search_tsv);
+CREATE INDEX IF NOT EXISTS idx_articles_ai_context_recent
+  ON articles(published_at DESC) WHERE status = 'ready' AND ai_context_allowed;
 CREATE INDEX IF NOT EXISTS idx_comments_post    ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_comments_article ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_comments_parent  ON comments(parent_comment_id);

@@ -150,6 +150,111 @@ export const SOURCES: Source[] = [
 
 const byName = new Map(SOURCES.map((s) => [s.name.toLowerCase(), s]))
 
+// These publishers' reviewed terms expressly restrict AI use, automated
+// analysis, aggregation, or a closely related operation. They remain useful as
+// attributed headline/link sources in the app, but neither their headlines nor
+// any transiently extracted text may be placed in an OpenAI prompt. Keep this
+// list aligned with forum/docs/PUBLISHER_CONTENT_RIGHTS.md. Unknown sources fail
+// closed until their policy has been reviewed.
+export const AI_CONTEXT_BLOCKED_SOURCES = new Set([
+  'The New Republic',
+  'HuffPost',
+  'Vox',
+  'The New Yorker',
+  'The Atlantic',
+  'The Guardian',
+  'NBC News',
+  'ABC News',
+  'CNBC',
+  'Sky News',
+  'New York Post',
+  'The Daily Wire',
+  'Newsmax',
+  'The Blaze',
+  'Breitbart',
+])
+
+// This is intentionally explicit instead of treating every non-blocked source
+// as allowed. Adding a publisher to SOURCES must be accompanied by a reviewed
+// allow or block decision, otherwise the synchronization test fails and the
+// runtime continues to fail closed.
+export const AI_CONTEXT_ALLOWED_SOURCES = new Set([
+  'Mother Jones',
+  'Democracy Now',
+  'The Nation',
+  'The Intercept',
+  'Salon',
+  'Talking Points Memo',
+  'Slate',
+  'Daily Beast',
+  'The New York Times',
+  'ProPublica',
+  'Time',
+  'The Independent',
+  'CBS News',
+  'NPR',
+  'Al Jazeera',
+  'Politico',
+  'Axios',
+  'PBS NewsHour',
+  'The Economist',
+  'BBC News',
+  'The Hill',
+  'Christian Science Monitor',
+  'Roll Call',
+  'NewsNation',
+  'Straight Arrow News',
+  'Newsweek',
+  'The Free Press',
+  'RealClearPolitics',
+  'The Dispatch',
+  'Reason',
+  'Just the News',
+  'Daily Mail',
+  'Washington Examiner',
+  'Washington Times',
+  'The American Conservative',
+  'Fox News',
+  'National Review',
+  'Washington Free Beacon',
+  'Daily Caller',
+  'The Federalist',
+  'PJ Media',
+  'RedState',
+  'American Thinker',
+])
+
+export const SOURCE_POLICY_REVIEWED_AT = '2026-08-01'
+export const PUBLISHER_IMAGE_MODE = 'remote_publisher_preview' as const
+export const LOCAL_ARTICLE_ANALYSIS_MODE = 'transient_derived_features' as const
+
+export function sourcePolicyDecision(sourceName: string | null | undefined) {
+  if (!sourceName) return null
+  const source = byName.get(sourceName.toLowerCase())
+  if (!source) return null
+  if (AI_CONTEXT_ALLOWED_SOURCES.has(source.name)) {
+    return {
+      reviewed_at: SOURCE_POLICY_REVIEWED_AT,
+      ai_context: 'eligible_attributed_headlines' as const,
+      image_mode: PUBLISHER_IMAGE_MODE,
+      local_analysis: LOCAL_ARTICLE_ANALYSIS_MODE,
+    }
+  }
+  if (AI_CONTEXT_BLOCKED_SOURCES.has(source.name)) {
+    return {
+      reviewed_at: SOURCE_POLICY_REVIEWED_AT,
+      ai_context: 'blocked' as const,
+      image_mode: PUBLISHER_IMAGE_MODE,
+      local_analysis: LOCAL_ARTICLE_ANALYSIS_MODE,
+    }
+  }
+  return null
+}
+
+export function sourceAllowsAiContext(sourceName: string | null | undefined): boolean {
+  return sourcePolicyDecision(sourceName)?.ai_context === 'eligible_attributed_headlines'
+}
+
 export function sourcePrior(sourceName: string | null | undefined): number | undefined {
   if (!sourceName) return undefined
   return byName.get(sourceName.toLowerCase())?.lean

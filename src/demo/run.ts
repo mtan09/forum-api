@@ -5,7 +5,10 @@ import { runDemoActivity } from './activity'
 
 initSentry()
 
-runDemoActivity(Number(process.env.DEMO_ACTIVITY_BATCH_SIZE ?? 20))
+runDemoActivity({
+  voteLimit: Number(process.env.DEMO_ACTIVITY_VOTE_BATCH_SIZE ?? 300),
+  contentLimit: Number(process.env.DEMO_ACTIVITY_CONTENT_BATCH_SIZE ?? 8),
+})
   .catch((error) => {
     console.error('[demo] activity run failed:', error)
     process.exitCode = 1

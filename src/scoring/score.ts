@@ -25,7 +25,12 @@ import { detectStances, type StanceHit } from './stances'
 // 1.2.0: posts were always placed; neutral and unrecognized text sat at 0.5
 // 2.0.0: posts combine partisan framing with a transparent policy-stance
 //        ontology; text with no directional evidence is left unclassified
-export const SCORER_VERSION = 'stance-2.0.0'
+// 3.0.0: posts add compositional policy rules plus a deterministic, local
+//        prototype fallback and retain evidence/method receipts for each hit
+export const ARTICLE_SCORER_VERSION = 'stance-2.0.0'
+export const POST_SCORER_VERSION = 'stance-3.0.0'
+// Backward-compatible export used by post-scoring scripts and tests.
+export const SCORER_VERSION = POST_SCORER_VERSION
 
 export type ContentType = 'news_report' | 'opinion' | 'analysis' | 'factual_report'
 
@@ -122,9 +127,17 @@ function describeHits(prefix: 'left' | 'right' | 'loaded', hits: TextFeatures['l
 }
 
 function describeStances(hits: StanceHit[]): string[] {
-  return hits.map((hit) =>
-    `stance-${hit.side}:"${hit.issue} · ${hit.label}"×1`
-  )
+  return hits.flatMap((hit) => [
+    `stance-${hit.side}:"${hit.issue} · ${hit.label}"×1`,
+    `stance-meta:${JSON.stringify({
+      side: hit.side,
+      issue: hit.issue,
+      position: hit.label,
+      method: hit.method,
+      confidence: Number(hit.confidence.toFixed(2)),
+      evidence: hit.evidence,
+    })}`,
+  ])
 }
 
 export function scoreArticle(input: {
@@ -158,7 +171,7 @@ export function scoreArticle(input: {
   )
 
   const signals = [
-    `scorer:${SCORER_VERSION}`,
+    `scorer:${ARTICLE_SCORER_VERSION}`,
     `prior:${priorKnown ? prior.toFixed(2) : 'unknown(0.50)'}`,
     `type:${type}(${reason})`,
     `subjectivity:${subj.toFixed(2)}`,
@@ -174,7 +187,7 @@ export function scoreArticle(input: {
     political_relevance: Number(relevance.toFixed(3)),
     content_type: type,
     lean_signals: signals,
-    scorer_version: SCORER_VERSION,
+    scorer_version: ARTICLE_SCORER_VERSION,
   }
 }
 
@@ -198,6 +211,9 @@ export function scorePost(content: string): PostScore {
     ? (stanceRight - stanceLeft) / stanceEvidence
     : 0
   const stanceStrength = Math.min(stanceEvidence / 4, 1)
+  const stanceConfidence = stances.length > 0
+    ? stances.reduce((sum, hit) => sum + hit.confidence, 0) / stances.length
+    : 0
 
   // Framing is a softer signal than an explicit policy stance. The combined
   // movement is capped so even highly partisan language stays on the scale.
@@ -211,13 +227,14 @@ export function scorePost(content: string): PostScore {
   const confidence = clamp01(
     0.1 +
     0.25 * framing.strength +
-    0.4 * stanceStrength +
+    0.4 * stanceStrength * (0.7 + 0.3 * stanceConfidence) +
     0.15 * Math.min(f.wordCount / 120, 1) +
     0.1 * Math.min(f.politicalCount / 3, 1)
   )
 
   const signals = [
-    `scorer:${SCORER_VERSION}`,
+    `scorer:${POST_SCORER_VERSION}`,
+    'classifier:hybrid-local',
     `confidence:${confidence.toFixed(2)}`,
     ...describeStances(stances),
     ...describeHits('left', f.leftHits),
@@ -229,6 +246,6 @@ export function scorePost(content: string): PostScore {
     position: position == null ? null : Number(position.toFixed(3)),
     confidence: Number(confidence.toFixed(3)),
     signals,
-    scorer_version: SCORER_VERSION,
+    scorer_version: POST_SCORER_VERSION,
   }
 }

@@ -95,7 +95,7 @@ admin.post('/reports/:id/resolve', async (c) => {
   return c.json({ ok: true, action })
 })
 
-// Structured beta feedback queue. Screenshot URLs are minted only for an
+// Structured feedback queue. Screenshot URLs are minted only for an
 // authenticated admin and expire after five minutes.
 admin.get('/feedback', async (c) => {
   const status = c.req.query('status') ?? 'open'
@@ -216,11 +216,20 @@ admin.get('/ingest-status', async (c) => {
 // Visibility for the temporary prelaunch community worker. This never exposes
 // generated text or reviewer credentials; it only shows operational counts.
 admin.get('/demo-activity-status', async (c) => {
-  const [accounts, jobs, recent] = await Promise.all([
+  const [accounts, jobs, kinds, recent] = await Promise.all([
     query('SELECT count(*)::int AS count FROM userdata WHERE is_demo = TRUE'),
     query(
       `SELECT status, count(*)::int AS count
        FROM demo_activity_jobs GROUP BY status ORDER BY status`
+    ),
+    query(
+      `SELECT kind, status, count(*)::int AS count,
+              count(*) FILTER (
+                WHERE status = 'queued' AND scheduled_for <= NOW()
+              )::int AS overdue
+       FROM demo_activity_jobs
+       GROUP BY kind, status
+       ORDER BY kind, status`
     ),
     query(
       `SELECT id, kind, status, scheduled_for, executed_at, attempts, last_error
@@ -233,6 +242,12 @@ admin.get('/demo-activity-status', async (c) => {
     enabled: process.env.DEMO_ACTIVITY_ENABLED === 'yes',
     demo_accounts: Number(accounts.rows[0]?.count ?? 0),
     jobs: Object.fromEntries(jobs.rows.map((row) => [row.status, Number(row.count)])),
+    jobs_by_kind: kinds.rows.map((row) => ({
+      kind: row.kind,
+      status: row.status,
+      count: Number(row.count),
+      overdue: Number(row.overdue),
+    })),
     recent: recent.rows,
   })
 })

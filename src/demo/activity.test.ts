@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { demoVoteDirection, scheduledOffsetMinutes } from './activity'
+import {
+  articleEngagementOffsetMinutes,
+  demoArticleShouldReceiveComment,
+  demoArticleVoterCount,
+  demoPersonaPostsOnDay,
+  demoPerspective,
+  demoScoreMatchesPersona,
+  demoVoteDirection,
+  scheduledOffsetMinutes,
+} from './activity'
+import { fallbackDemoPostContent, stripDemoAuthorPrefix } from './generate'
+import { scorePost } from '../scoring/score'
 
 describe('demo activity planning', () => {
   it('produces stable, bounded scheduling offsets', () => {
@@ -8,6 +19,40 @@ describe('demo activity planning', () => {
     expect(first).toBeGreaterThanOrEqual(5)
     expect(first).toBeLessThanOrEqual(719)
     expect(scheduledOffsetMinutes('2026-08-02:post:jane:daily')).not.toBe(first)
+  })
+
+  it('stages a bounded number of article reactions shortly after ingest', () => {
+    const offset = articleEngagementOffsetMinutes('article:abc:vote:user')
+    expect(offset).toBe(articleEngagementOffsetMinutes('article:abc:vote:user'))
+    expect(offset).toBeGreaterThanOrEqual(5)
+    expect(offset).toBeLessThanOrEqual(105)
+    expect(demoArticleVoterCount('article-a', 31)).toBeGreaterThanOrEqual(2)
+    expect(demoArticleVoterCount('article-a', 31)).toBeLessThanOrEqual(5)
+    expect(demoArticleVoterCount('article-a', 2)).toBe(2)
+    expect(demoArticleVoterCount('article-a', 0)).toBe(0)
+  })
+
+  it('comments on a minority of articles and favors clustered coverage', () => {
+    const sample = Array.from({ length: 1_000 }, (_, index) => `article-${index}`)
+    const clustered = sample.filter((id) => demoArticleShouldReceiveComment(id, true)).length
+    const unclustered = sample.filter((id) => demoArticleShouldReceiveComment(id, false)).length
+    expect(clustered).toBeGreaterThan(140)
+    expect(clustered).toBeLessThan(260)
+    expect(unclustered).toBeGreaterThan(40)
+    expect(unclustered).toBeLessThan(130)
+    expect(clustered).toBeGreaterThan(unclustered)
+  })
+
+  it('schedules every persona on two days of each three-day post rotation', () => {
+    for (let index = 0; index < 31; index++) {
+      const postingDays = [100, 101, 102].filter((day) => demoPersonaPostsOnDay(index, day))
+      expect(postingDays).toHaveLength(2)
+    }
+    const dailyCounts = [100, 101, 102].map((day) =>
+      Array.from({ length: 31 }, (_, index) => demoPersonaPostsOnDay(index, day))
+        .filter(Boolean).length
+    )
+    expect(dailyCounts.every((count) => count >= 20 && count <= 21)).toBe(true)
   })
 
   it('normally supports aligned posts and opposes distant ones', () => {
@@ -23,5 +68,52 @@ describe('demo activity planning', () => {
 
   it('does not force unscored posts into a partisan reaction', () => {
     expect(['up', 'down']).toContain(demoVoteDirection(0.9, null, 'unscored'))
+  })
+
+  it('uses persona lean only to validate generated text, not as its score', () => {
+    expect(demoPerspective(0.2)).toBe('left')
+    expect(demoPerspective(0.5)).toBe('center')
+    expect(demoPerspective(0.8)).toBe('right')
+    expect(demoScoreMatchesPersona(0.2, 0.31)).toBe(true)
+    expect(demoScoreMatchesPersona(0.2, null)).toBe(false)
+    expect(demoScoreMatchesPersona(0.8, 0.31)).toBe(false)
+    expect(demoScoreMatchesPersona(0.5, null)).toBe(true)
+  })
+
+  it('has concise deterministic fallback posts that the stance scorer recognizes', () => {
+    const base = {
+      username: 'Fixture',
+      role: 'local organizer',
+      voice: 'Direct and practical.',
+      interests: ['economy', 'government'],
+      cadenceSeed: 1,
+    }
+    for (const lean of [0.2, 0.8]) {
+      const generated = fallbackDemoPostContent({ ...base, lean }, 'A current policy story')
+      const words = generated.text.split(/\s+/).filter(Boolean).length
+      const score = scorePost(generated.text)
+      expect(words).toBeGreaterThanOrEqual(25)
+      expect(words).toBeLessThanOrEqual(65)
+      expect(demoScoreMatchesPersona(lean, score.position)).toBe(true)
+    }
+  })
+
+  it('removes duplicated demo authorship only when it is a leading byline', () => {
+    expect(stripDemoAuthorPrefix(
+      'Nia Brooks (Fictional demo account): The Senate should hold a transparent vote.',
+      'Nia Brooks'
+    )).toBe('The Senate should hold a transparent vote.')
+    expect(stripDemoAuthorPrefix(
+      'Nia Brooks — The Senate should hold a transparent vote.',
+      'Nia Brooks'
+    )).toBe('The Senate should hold a transparent vote.')
+    expect(stripDemoAuthorPrefix(
+      'I agree with Nia Brooks on the need for a transparent vote.',
+      'Nia Brooks'
+    )).toBe('I agree with Nia Brooks on the need for a transparent vote.')
+    expect(stripDemoAuthorPrefix(
+      'Nia Brooks argues that the Senate should hold a transparent vote.',
+      'Nia Brooks'
+    )).toBe('Nia Brooks argues that the Senate should hold a transparent vote.')
   })
 })

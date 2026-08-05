@@ -5,6 +5,7 @@ import type { AppEnv } from '../types'
 
 const mocks = vi.hoisted(() => ({
   query: vi.fn(),
+  connect: vi.fn(),
   notify: vi.fn(),
   moderateText: vi.fn(async () => ({
     decision: 'allow',
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../db', () => ({
-  default: { connect: vi.fn() },
+  default: { connect: mocks.connect },
   query: mocks.query,
 }))
 vi.mock('../middleware/auth', () => ({
@@ -36,6 +37,7 @@ const app = new Hono<AppEnv>().route('/users', users)
 describe('private follows and notification preferences', () => {
   beforeEach(() => {
     mocks.query.mockReset()
+    mocks.connect.mockReset()
     mocks.notify.mockReset()
   })
 
@@ -147,5 +149,33 @@ describe('private follows and notification preferences', () => {
       current: true,
     })
     expect(mocks.query.mock.calls[0][0]).toContain('INSERT INTO ai_data_consents')
+  })
+
+  it('deletes feedback in the same transaction before deleting an account', async () => {
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    }
+    mocks.connect.mockResolvedValue(client)
+
+    const response = await app.request('/users/me', { method: 'DELETE' })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ ok: true })
+    expect(client.query.mock.calls.map(([sql]) => String(sql).trim())).toEqual([
+      'BEGIN',
+      expect.stringContaining('INSERT INTO deletion_jobs'),
+      'DELETE FROM beta_feedback WHERE user_id = $1',
+      'DELETE FROM userdata WHERE id = $1',
+      'COMMIT',
+    ])
+    expect(client.query.mock.calls[1][1]).toEqual([
+      'viewer',
+      'viewer/',
+      'feedback/viewer/',
+    ])
+    expect(client.query.mock.calls[2][1]).toEqual(['viewer'])
+    expect(client.query.mock.calls[3][1]).toEqual(['viewer'])
+    expect(client.release).toHaveBeenCalledOnce()
   })
 })

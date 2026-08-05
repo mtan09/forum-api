@@ -33,7 +33,7 @@ async function backfillArticles() {
   let updated = 0
   while (updated < MAX_RECENT_ARTICLES) {
     const rows = await pool.query(
-      `SELECT id, title, content FROM articles
+      `SELECT id, title, analysis_text FROM articles
        WHERE recommendation_embedding IS NULL
        ORDER BY published_at DESC NULLS LAST LIMIT $1`,
       [Math.min(BATCH, MAX_RECENT_ARTICLES - updated)]
@@ -41,7 +41,7 @@ async function backfillArticles() {
     if (rows.rows.length === 0) return updated
     const payload = rows.rows.map((row) => ({
       id: row.id,
-      embedding: semanticEmbedding(`${row.title ?? ''}. ${row.title ?? ''}. ${row.content ?? ''}`),
+      embedding: semanticEmbedding(`${row.title ?? ''}. ${row.title ?? ''}. ${row.analysis_text ?? ''}`),
     }))
     await pool.query(
       `UPDATE articles a SET recommendation_embedding = values.embedding

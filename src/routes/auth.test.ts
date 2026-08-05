@@ -48,6 +48,12 @@ vi.mock('../lib/moderation', () => ({
   moderateText: mocks.moderateText,
   moderationFailure: () => null,
 }))
+vi.mock('../middleware/auth', () => ({
+  requireAuth: async (c: any, next: any) => {
+    c.set('userId', 'user-1')
+    await next()
+  },
+}))
 
 import auth from './auth'
 
@@ -125,6 +131,8 @@ describe('signup OpenAI permission', () => {
       AI_CONSENT_VERSION,
       'declined',
     ])
+    expect(mocks.poolQuery).not.toHaveBeenCalled()
+    expect(mocks.sendEmail).not.toHaveBeenCalled()
   })
 })
 
@@ -231,6 +239,26 @@ describe('password recovery', () => {
 describe('email verification', () => {
   beforeEach(() => {
     mocks.poolQuery.mockReset()
+    mocks.sendEmail.mockClear()
+  })
+
+  it('creates and sends the first verification link only when requested', async () => {
+    mocks.poolQuery
+      .mockResolvedValueOnce({ rows: [{ email: 'reader@example.com', email_verified: false }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await app.request('/auth/resend-verification', { method: 'POST' })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toEqual({ ok: true })
+    expect(mocks.poolQuery.mock.calls[1][0]).toContain('DELETE FROM email_tokens')
+    expect(mocks.poolQuery.mock.calls[2][0]).toContain('INSERT INTO email_tokens')
+    expect(mocks.sendEmail).toHaveBeenCalledWith({
+      to: 'reader@example.com',
+      subject: 'Verify',
+      html: 'body',
+    })
   })
 
   it('atomically consumes a live link and verifies the account', async () => {

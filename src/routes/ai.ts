@@ -1,9 +1,10 @@
 import { Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import OpenAI from 'openai'
-import { articleSubject, corpusCoverage, postSubject } from '../ai/retrieval'
+import { articleSubject, corpusCoverage, coverageIntent, postSubject } from '../ai/retrieval'
 import pool from '../db'
 import { moderateText, moderationFailure } from '../lib/moderation'
+import { captureMessage } from '../lib/sentry'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
@@ -98,7 +99,7 @@ Today's date is ${new Date().toISOString().slice(0, 10)}. Your training data may
     subjectBlock ? `\n\n${subjectBlock}` : ''
   }${
     coverageBlock
-      ? `\n\nRecent coverage from the app's news feed. Ground your answers in it when relevant, name the outlet when you draw on a specific article, and never invent coverage that is not listed:\n${coverageBlock}`
+      ? `\n\nRecent coverage from the app's news feed. This block is current indexed coverage supplied at request time. For latest, hottest, trending, or current-events questions, answer from this block and describe the result as based on forum's indexed coverage; do not claim that you lack current coverage when this block answers the question. Name the outlet when you draw on a specific article, distinguish the app's indexed coverage from a complete survey of all news, and never invent coverage that is not listed:\n${coverageBlock}`
       : ''
   }`
 
@@ -132,6 +133,22 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
   const moderationError = moderationFailure(moderation)
   if (moderationError) return c.json(moderationError.body, moderationError.status)
 
+  const articleId =
+    typeof body?.article_id === 'string' && UUID_RE.test(body.article_id) ? body.article_id : null
+  const postId =
+    typeof body?.post_id === 'string' && UUID_RE.test(body.post_id) ? body.post_id : null
+  const articleResult = articleId ? await articleSubject(articleId) : null
+  if (articleResult?.blocked) {
+    return c.json(
+      {
+        code: 'ARTICLE_AI_CONTEXT_UNAVAILABLE',
+        error: 'This publisher article cannot be added to forumAI context. You can still ask a general question.',
+      },
+      422
+    )
+  }
+  const subject = articleResult?.subject ?? (postId ? await postSubject(postId) : null)
+
   const usage = await pool.query(
     `INSERT INTO ai_usage (user_id, day, requests) VALUES ($1, CURRENT_DATE, 1)
      ON CONFLICT (user_id, day) DO UPDATE SET requests = ai_usage.requests + 1
@@ -145,16 +162,10 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
     )
   }
 
-  const articleId =
-    typeof body?.article_id === 'string' && UUID_RE.test(body.article_id) ? body.article_id : null
-  const postId =
-    typeof body?.post_id === 'string' && UUID_RE.test(body.post_id) ? body.post_id : null
-
   // Grounding: the item the user is viewing (if any) plus matching recent
-  // articles from our own corpus. Retrieval is seeded with the question,
+  // eligible attributed headlines from our own index. Retrieval is seeded with the question,
   // the last couple of user turns (follow-ups alone carry few keywords),
-  // and the subject's own text.
-  const subject = articleId ? await articleSubject(articleId) : postId ? await postSubject(postId) : null
+  // and the subject's headline or post text.
   const recentUserTurns = history
     .filter((h) => h.role === 'user' && h.content)
     .slice(-2)
@@ -165,6 +176,20 @@ ai.post('/chat', requireAuth, aiBurstLimit, async (c) => {
     articleId,
     message
   )
+  const intent = coverageIntent(message)
+  const coverageItems = coverage.split('\n').filter((line) => line.startsWith('- "')).length
+  console.info('[forumAI] corpus context', {
+    intent,
+    subject_kind: articleId ? 'article' : postId ? 'post' : 'none',
+    coverage_chars: coverage.length,
+    coverage_items: coverageItems,
+  })
+  if (intent !== 'relevance' && !coverage) {
+    captureMessage('forumAI current-events corpus context was empty', 'warning', {
+      intent,
+      subject_kind: articleId ? 'article' : postId ? 'post' : 'none',
+    })
+  }
 
   const client = new OpenAI()
 

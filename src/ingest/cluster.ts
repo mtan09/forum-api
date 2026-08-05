@@ -6,8 +6,9 @@
 //  2. Greedy leader clustering on keyword-profile similarity.
 //  3. Keep clusters with enough articles from enough distinct outlets.
 //  4. Generate the story title from coverage metadata and show one
-//     attributed publisher headline per spectrum band. Article bodies help
-//     form clusters but are never copied into public story summaries.
+//     attributed publisher headline per spectrum band. Bounded keyword
+//     profiles derived during transient ingestion form clusters; article
+//     bodies are never stored or copied into public story summaries.
 //  5. Match recent user posts to clusters by keyword/hashtag overlap;
 //     their scored positions become the cluster's public_position.
 //  6. Upsert into subtopics by cluster_key; stale clusters age out of
@@ -18,7 +19,13 @@
 
 import { query } from '../db'
 import { looksLikeVideoPlaylistChrome } from './content-quality'
-import { extractKeywords, keywordSimilarity, toHashtags, type Keywords } from './keywords'
+import {
+  extractKeywords,
+  keywordSimilarity,
+  restoreKeywords,
+  toHashtags,
+  type Keywords,
+} from './keywords'
 
 const RECENT_DAYS = 7
 const SIM_THRESHOLD = 0.3     // join a cluster at ≥ this similarity to its leader
@@ -30,7 +37,8 @@ const POST_MATCH_TERMS = 2    // keyword overlaps for a post to count toward a c
 export type ArticleRow = {
   id: string
   title: string
-  content: string
+  content?: string | null
+  analysis_profile?: unknown
   source: string
   source_lean: number | null
   political_lean: number | null
@@ -76,10 +84,11 @@ function truncateAtWord(text: string, maxChars: number): string {
 // The final hard cap also handles pages with one giant punctuation-free
 // block of navigation or video-player text.
 export function leadOf(article: ArticleRow, maxChars = 260): string {
-  if (looksLikeVideoPlaylistChrome(article.content)) {
+  const content = article.content ?? ''
+  if (looksLikeVideoPlaylistChrome(content)) {
     return truncateAtWord(article.title, maxChars)
   }
-  const sentences = sentenceSplit(article.content)
+  const sentences = sentenceSplit(content)
     .filter((s) => s.length >= 40 && !JUNK_SENTENCE_RE.test(s))
   let out = ''
   for (const s of sentences) {
@@ -92,6 +101,15 @@ export function leadOf(article: ArticleRow, maxChars = 260): string {
     if (out.length >= maxChars * 0.6) break
   }
   return truncateAtWord(out || article.title, maxChars)
+}
+
+export function articleKeywordProfile(article: ArticleRow): Keywords {
+  if (article.analysis_profile) return restoreKeywords(article.analysis_profile, article.title)
+  const content = article.content ?? ''
+  return extractKeywords(
+    article.title,
+    content && !looksLikeVideoPlaylistChrome(content) ? content : article.title
+  )
 }
 
 const centrality = (a: ArticleRow) => Math.abs((a.source_lean ?? 0.5) - 0.5)
@@ -179,10 +197,11 @@ function mergedProfile(profiles: Keywords[]): Keywords {
 
 export async function clusterAndPublish(): Promise<{ clusters: number; hot: string[] }> {
   const { rows: articles } = await query(
-    `SELECT id, title, content, source, source_lean, political_lean,
+    `SELECT id, title, content, analysis_profile, source, source_lean, political_lean,
             general_topic_id, published_at, created_at, media
      FROM articles
-     WHERE content IS NOT NULL AND scorer_version IS NOT NULL
+     WHERE scorer_version IS NOT NULL
+       AND (analysis_profile IS NOT NULL OR content IS NOT NULL OR title IS NOT NULL)
        AND created_at > NOW() - INTERVAL '${RECENT_DAYS} days'
      ORDER BY created_at DESC, id`
   )
@@ -193,10 +212,7 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
   // from snowballing until it absorbs unrelated stories.
   const clusters: Cluster[] = []
   for (const article of articles as ArticleRow[]) {
-    const profileContent = looksLikeVideoPlaylistChrome(article.content)
-      ? article.title
-      : article.content
-    const profile = extractKeywords(article.title, profileContent)
+    const profile = articleKeywordProfile(article)
     let best: Cluster | null = null
     let bestSim = 0
     for (const c of clusters) {

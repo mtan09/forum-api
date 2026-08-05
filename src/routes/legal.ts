@@ -77,16 +77,16 @@ legal.get('/privacy', (c) =>
   <li><strong>Feed personalization:</strong> interests you choose, items shown in your feed, opens, approximate time visible, outbound publisher opens, and “Not interested” choices. These first-party signals are used to rank and diversify your feed; they are not used for advertising.</li>
   <li><strong>Computed data:</strong> a political-lean placement derived from your posts and votes by a deterministic algorithm. It exists only inside the app and is shown on your profile.</li>
   <li><strong>Device and diagnostics:</strong> a push-notification token if you enable notifications. Crash diagnostics may include app version, build, device model, operating-system version, and the screen where a problem occurred. We do not collect contacts or advertising identifiers. Uploaded photos have their metadata (including GPS EXIF) stripped on upload.</li>
-  <li><strong>Beta feedback:</strong> feedback text, an optional screenshot, and the route, theme, app version/build, platform, OS, and device metadata attached to the report.</li>
+  <li><strong>Feedback:</strong> feedback text, an optional screenshot, and the route, theme, app version/build, platform, OS, and device metadata attached to the report.</li>
 </ul>
 
 <h2>How it's used</h2>
 <ul>
   <li>To operate the product: showing your content, computing placements, delivering notifications you opted into, and sending account emails (verification, password reset).</li>
   <li><strong>Recommendations:</strong> forum locally creates numeric topic vectors from posts and article coverage, then combines them with your selected interests and in-app activity. Behavioral profiles are not sent to OpenAI or an advertising network. You can clear selected interests, viewing signals, and “Not interested” choices under Settings → Content → Reset feed personalization.</li>
-  <li><strong>forumAI:</strong> if you explicitly allow OpenAI processing, your question, recent conversation context, and relevant article/post or news context are sent to OpenAI to generate the answer. They are not used by forum to build an advertising profile.</li>
+  <li><strong>forumAI:</strong> if you explicitly allow OpenAI processing, your question, recent conversation context, eligible attributed publisher headlines, forum-generated story metadata, and relevant community-post context may be sent to OpenAI to generate the answer. Publisher article bodies are not stored or sent to OpenAI. Content from publishers with reviewed AI or automation restrictions is excluded from OpenAI context. Locally derived aggregate clustering signals may still help forum identify a covered topic, after which only eligible attributed headlines are supplied to OpenAI. These inputs are not used by forum to build an advertising profile.</li>
   <li><strong>Moderation:</strong> narrow safety rules run on forum's server first. If you explicitly allow OpenAI processing, profile text, posts, comments, direct messages, forumAI prompts, and uploaded images are also sent to OpenAI's moderation service. Signup usernames are checked only by forum's on-server rules. We store decision metadata and a one-way input hash for audit, not rejected raw content.</li>
-  <li><strong>Beta quality:</strong> structured feedback and crash diagnostics help us reproduce and fix problems.</li>
+  <li><strong>Product quality:</strong> structured feedback and crash diagnostics help us reproduce and fix problems.</li>
 </ul>
 
 <h2>Your OpenAI choice</h2>
@@ -104,7 +104,7 @@ legal.get('/privacy', (c) =>
 <p>Infrastructure providers process data on our behalf: application hosting (Railway), database hosting (Neon), public and private image storage (Cloudflare R2), email delivery (Resend), push and build delivery (Expo), crash diagnostics (Sentry), TestFlight distribution (Apple), and AI responses and optional additional safety checks (OpenAI). Each receives only what its function requires. forum requires providers to protect personal data consistently with this policy and applicable privacy obligations and does not authorize them to use forum data for advertising.</p>
 
 <h2>Retention and deletion</h2>
-<p>Data is kept while your account exists. Settings → Delete Account immediately removes your profile, posts, comments, votes, messages, and push tokens. Associated public media and private feedback screenshots are queued for deletion from active storage, retried on failure, and removed within 24 hours. Backups age out on a rolling basis.</p>
+<p>Data is kept while your account exists. Settings → Delete Account immediately removes your profile, posts, comments, votes, messages, push tokens, and feedback text and metadata. Associated public media and private feedback screenshots are queued for deletion from active storage, retried on failure, and removed within 24 hours. Backups age out on a rolling basis.</p>
 
 <h2>Your rights</h2>
 <p>You can access and edit your profile in-app, export your content by request, and delete everything yourself. Contact us for anything else.</p>

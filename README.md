@@ -16,11 +16,16 @@ Backend for the forum app (`../forum`). Hono + Postgres, self-managed JWT auth, 
 
 ## News ingestion, bias scoring & hot-topic clustering
 
-The article feed is real: `src/ingest/` pulls RSS from ~59 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept ~even between left/center/right), extracts full text, dedupes by URL/content hash, gates on political relevance, auto-derives hashtags and a background general topic, scores, and inserts as `ready`. Run once with `npm run ingest`. Production runs the same command in a dedicated hourly Railway cron service; the API process never schedules ingestion.
+The article feed is real: `src/ingest/` pulls RSS from 58 curated outlets across the political spectrum (`src/ingest/sources.ts`, kept roughly even between left/center/right), transiently extracts text, dedupes by URL/content hash, gates on political relevance, derives bounded analysis fields, scores, and inserts as `ready`. The extracted body is never written to PostgreSQL. Run once with `npm run ingest`. Production runs the same command in a dedicated hourly Railway cron service; the API process never schedules ingestion.
 
 Publisher data is treated as untrusted. Image selection prefers a feed's canonical enclosure, validates every source with the same URL rules, rejects malformed article-URL-plus-caption metadata, and falls back to a valid page image. Full-text extraction rejects timestamp-heavy video-player/navigation rails from any publisher and falls back to the cleaner RSS text instead, so unrelated video headlines do not pollute scoring or story summaries.
 
-**Nothing is hand-written.** After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles into stories: each article is compared with a fixed founding-story profile, followed by a union-find merge pass over fixed profiles, so a cluster cannot accumulate vocabulary and snowball into unrelated topics. Automatic article membership is rebuilt on every clustering run rather than retaining stale links. Clusters with 3+ articles from 2+ outlets become subtopics — the "hot topics" carousel (`GET /topics/hot`) and summary screens use a real member headline for the story title, an original outlet-count coverage note, and one attributed publisher **headline** per Left/Center/Right band. Stored article-body sentences are never used in public summaries or returned through article APIs. `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts. Deterministic — no LLM anywhere in the clustering pipeline.
+**Nothing is hand-written.** After every ingest pass (or via `npm run cluster`), `src/ingest/cluster.ts` groups the last 7 days of articles into stories using one-way weighted term identifiers derived during ingestion. Each article is compared with a fixed founding-story profile, followed by a union-find merge pass over fixed profiles, so a cluster cannot accumulate vocabulary and snowball into unrelated topics. Automatic article membership is rebuilt on every clustering run rather than retaining stale links. Clusters with 3+ articles from 2+ outlets become subtopics — the "hot topics" carousel (`GET /topics/hot`) and summary screens use a real member headline for the story title, an original outlet-count coverage note, and one attributed publisher **headline** per Left/Center/Right band. Article-body sentences are neither stored nor used in public summaries. `volume` is the real article+post count, and `public_position` is the average scored position of matched user posts. Deterministic — no LLM anywhere in the clustering pipeline.
+
+Every configured publisher has an explicit forumAI allow or block decision with
+a shared recorded policy-review date and delivery/analysis modes. The allowed
+and blocked sets are exhaustive and disjoint under test, so an unknown or newly
+added source fails closed until it receives a reviewed decision.
 
 **Hashtags** are the organizing layer instead of fixed categories: articles get them auto-extracted from their keywords; users pick their own when posting (`POST /posts` accepts `hashtags[]`, plus inline `#tags` in the text). The 7 general topics still exist silently as background metadata.
 
@@ -28,8 +33,8 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 
 - **Lean (0 = left, 1 = right):** starts from the outlet's published lean rating (AllSides/Ad Fontes approximations in `sources.ts`), then shifts by at most ±0.25 based on partisan framing vocabulary in the text (Gentzkow–Shapiro-style term pairs: "estate tax"/"death tax", "undocumented"/"illegal alien", ...). Framing counts only outside quotations and is capped per term.
 - **Fact vs. opinion:** a separate subjectivity score (loaded language, first person, opinion markers, quote density) plus URL/section heuristics classifies each piece as `factual_report` / `news_report` / `analysis` / `opinion`. The app shows reporting with a "Source Lean" bar and a badge instead of claiming the article itself has a measured slant.
-- **Posts:** no outlet prior exists, so post placement combines partisan framing with a versioned US issue-and-stance ontology (`src/scoring/stances.ts`). The ontology recognizes explicit propositions such as requiring congressional authorization for war, expanding immigration pathways, strengthening collective bargaining, or cutting federal spending. Posts with no directional evidence store `NULL` rather than being falsely labeled center; genuine mixed evidence can still land at 0.5.
-- **Reproducible by construction:** the entire scale is committed lexicons, stance rules, and fixed weights (`src/scoring/lexicons.ts`, `stances.ts`, `score.ts`). Every score stores the signals that produced it (`lean_signals` / `position_signals`) and its `scorer_version` — surfaced verbatim in the app's **scorer receipts** UI. Changing any lexicon, stance, weight, or prior = bump `SCORER_VERSION` and `npm run rescore` to recompute everything from stored text. `npm run audit:posts` is a read-only preview of current versus proposed post scores.
+- **Posts:** no outlet prior exists, so post placement uses a layered, versioned classifier: high-precision partisan framing, direct proposition rules, subject-plus-predicate composition, a local reviewed-prototype fallback for natural paraphrases, and lower-weight contextual alignment for explicit coalition/value arguments (`src/scoring/stances.ts`, `semantic-stances.ts`). It handles support, opposition, quotation, indirect attribution, and explicit disclaimers without using the author's identity or activity. Posts with no directional evidence store `NULL` rather than being falsely labeled center; genuine mixed evidence can still land at 0.5.
+- **Reproducible by construction:** the entire scale is committed lexicons, stance rules, local prototypes, and fixed weights (`src/scoring/lexicons.ts`, `stances.ts`, `semantic-stances.ts`, `score.ts`). No post text leaves forum for spectrum placement. Every score stores the evidence span, detection method, confidence, and scorer version — surfaced in the app's **scorer receipts** UI. `npm run audit:posts` shadow-compares stored and proposed scores plus the reviewed regression corpus. `npm run rescore:posts` is a dry run unless explicitly passed `--apply`; `npm run rescore` also refetches article pages for transient article recomputation without storing bodies.
 
 ## User spectrum, The Floor & moderation
 
@@ -40,7 +45,7 @@ Scoring (`src/scoring/`) is **deterministic — no LLM, no black box**:
 - **Private accounts** — follows have pending/accepted states. Unapproved visitors see basic profile identity and spectrum but not collected Posts/Comments/Upvoted/Saved history; individually encountered content remains eligible for feeds, search, and threads. Blocking removes follow relationships.
 - **Notifications** — Push and Email preferences exist per replies/upvotes/DMs/follows. Email delivery is globally opt-in and requires a verified address; replies and DMs send immediately and upvotes coalesce per post. Successful Expo ticket IDs are persisted, their APNs/FCM receipts are checked after the recommended delay, and dead device tokens are removed.
 - **Hardening** — every authenticated request re-resolves the user, so deleted or banned accounts invalidate old JWTs immediately. Sliding-window rate limits protect sensitive routes, uploads are re-encoded with EXIF stripped, Sentry redacts PII/tokens, and `/health` checks Postgres.
-- **Deletion and feedback** — account deletion transactionally enqueues public/private R2 cleanup with retries and a 24-hour alert. Structured beta feedback stores device/build context and optional screenshots in a separate private bucket; only admins receive short-lived signed URLs.
+- **Deletion and feedback** — account deletion immediately removes structured feedback along with the profile and other account data, then transactionally enqueues public/private R2 cleanup with retries and a 24-hour alert. While an account exists, structured feedback stores device/build context and optional screenshots in a separate private bucket; only admins receive short-lived signed URLs.
 - **Reliable ingestion** — a Postgres advisory lock prevents overlap, database and per-source failures retry independently, clustering remains in the successful flow, and `ingest_runs` records totals, failures, duration, and freshness.
 - **Temporary review community** — the initial prelaunch database can run 31 visibly labeled fictional personas with distinct bios, viewpoints, interests, and voices. Durable jobs stagger posts, comments, reactions, and Floor pins; generated content is moderated, auditable, and idempotent. The worker is explicitly enabled and has a guarded post-approval cleanup. See `docs/DEMO_COMMUNITY.md`.
 
@@ -56,22 +61,28 @@ npm install
 npm run dev                                      # http://localhost:3000
 npm run seed:expand                              # lived-in community via the API
 npm run ingest                                   # fetch + score real news into the article feed
-npm run backfill:article-content                 # dry-run repair for stripped recent article rows
+npm run scrub:article-bodies                     # dry-run profile/parity audit; guarded apply removes legacy bodies
 npm run audit:posts                              # read-only scorer audit over stored posts
+npm run rescore:posts                            # dry-run post backfill; add -- --apply deliberately
 ```
 
 Local seed accounts are development fixtures only. Set or rotate their
 passwords locally after seeding; production and App Review credentials must
 never be written in this repository.
 
-`npm test` runs the vitest suite (scorer determinism, rate limiter, hashtag normalization, publisher-image URL validation, extracted-content quality, and headline-only perspective summaries); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
+`npm test` runs the vitest suite (scorer determinism and labeled-corpus thresholds, rate limiter, hashtag normalization, publisher-image URL validation, extracted-content quality, and headline-only perspective summaries); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
 Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins), and `seed:stances` (focused left/right/mixed scoring fixture for an existing mock community). The expansion includes the same substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
 
 For App Review, migration 020 and `npm run harden:demo` convert the seeded
-`@example.dev` fixtures into locked fictional demo accounts. With
+`@example.dev` fixtures into locked fictional demo accounts. Migration 021 adds
+the transient-analysis profile and source-level forumAI eligibility fields;
+migration 022 adds idempotent jobs for reactions to newly ingested articles. With
 `DEMO_ACTIVITY_ENABLED=yes`, `npm run demo:activity` syncs their unique bios and
-personas, plans staggered activity, and executes due jobs. It is safe to invoke
+personas, plans staggered concise posts, comments, votes, article reactions, and Floor
+activity, and executes due vote/content lanes independently. Every incoming
+feed-eligible article is eventually planned even when an ingest burst exceeds a
+single cron pass. It is safe to invoke
 frequently. After approval, disable the worker, preview `npm run demo:cleanup`,
 then apply only with the exact guarded value documented in
 `docs/DEMO_COMMUNITY.md`.
@@ -80,10 +91,10 @@ then apply only with the exact guarded value documented in
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| `POST /auth/signup` `{username,email,password,ai_consent_accepted,ai_consent_version}` | — | Create account with an explicit allow/decline AI decision → `{token, user}` |
+| `POST /auth/signup` `{username,email,password,ai_consent_accepted,ai_consent_version}` | — | Create an unverified account with an explicit allow/decline AI decision → `{token, user}`; no email is sent until onboarding requests it |
 | `POST /auth/login` `{email,password}` | — | Log in → `{token, user}` |
 | `POST /auth/change-password` `{current_password,new_password}` | ✅ | Change password |
-| `GET /auth/verify?token=` · `POST /auth/resend-verification` | Link / ✅ | Verify email or resend the verification link |
+| `GET /auth/verify?token=` · `POST /auth/resend-verification` | Link / ✅ | Verify email, or request/replace the verification link when the verification UI is reached |
 | `POST /auth/forgot-password` · `/reset-password` | — | Request and redeem an emailed reset code |
 | `GET /users/me` · `PATCH /users/me` · `DELETE /users/me` | ✅ | Own profile (patch: username/bio/avatar_url/header_url) / delete account |
 | `GET`/`PUT /users/me/ai-consent` | ✅ | Inspect, grant, decline, or withdraw versioned OpenAI processing permission |
@@ -114,13 +125,13 @@ then apply only with the exact guarded value documented in
 | `POST /reports` `{target_kind,target_id,reason}` | ✅ | Report content, users, or a DM received by the caller |
 | `POST /reports` `{target_kind,target_id,reason,detail?}` | ✅ | Flag a post/article/comment/user |
 | `GET /admin/reports` · `POST /admin/reports/:id/resolve` | Admin | Review reports; hide, ban, or dismiss |
-| `POST /feedback` · `POST /feedback/screenshot` | ✅ | Create structured beta feedback and optional private screenshot |
+| `POST /feedback` · `POST /feedback/screenshot` | ✅ | Create structured feedback and optional private screenshot |
 | `GET /admin/feedback` · `PATCH /admin/feedback/:id` | Admin | Triage feedback, status, and notes |
 | `GET /admin/moderation` · `POST /admin/moderation/:id/resolve` | Admin | Review flagged existing-corpus records |
 | `GET /admin/ingest-status` | Admin | Recent ingest runs, freshness, and source failures |
 | `GET /admin/demo-activity-status` | Admin | Temporary review-fixture worker state and recent job outcomes |
 | `POST /storage/upload?filename=x.jpg` (raw bytes) | ✅ | Image upload → `{url}` (disk in dev, R2 when configured) |
-| `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream, grounded in the article corpus |
+| `POST /ai/chat` `{message,framing?,history?,article_id?,post_id?}` | ✅ | Daily-capped forumAI SSE stream grounded in eligible headlines, forum story metadata, and consented community context |
 | `GET /legal/terms` · `/legal/privacy` | — | Public legal pages |
 | `GET /` · `/p/:id` · `/a/:id` | — | Product landing and Open Graph share pages with app deep links |
 
@@ -128,7 +139,7 @@ Auth: `Authorization: Bearer <jwt>`. Errors: `{error: string}` with a meaningful
 
 ## forumAI
 
-`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. The prompt is grounded via deterministic retrieval (`src/ai/retrieval.ts`) over stored recent article text. Topic-specific prompts use full-text relevance; broad prompts about the biggest story or latest headlines automatically use the generated hot-story index and recent articles, so an `article_id` is not required. Retrieved coverage is balanced across source-lean bands when the corpus permits and injected as private model context without exposing article bodies in the app or public article APIs. Passing `article_id` or `post_id` still pins the chat to that subject; `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
+`POST /ai/chat` streams Server-Sent Events (`delta` per perspective → `done`), so answers render token-by-token instead of after a long wait. Deterministic retrieval (`src/ai/retrieval.ts`) ranks eligible recent headlines using the stored bounded analysis profile. Broad prompts about the biggest story or latest headlines use generated hot-story metadata and eligible recent headlines, so an `article_id` is not required. Context is balanced across source-lean bands when possible. Publisher bodies are not stored or sent to OpenAI; publishers with explicit AI/automation restrictions are excluded, and unknown publishers fail closed. Passing an eligible `article_id` or a consented `post_id` can pin the chat to that subject; restricted article IDs return `ARTICLE_AI_CONTEXT_UNAVAILABLE` without consuming the daily allowance. `history` carries in-session conversation memory. Requires `OPENAI_API_KEY` and is capped by `AI_DAILY_LIMIT` (50 by default).
 
 ## Configuration and secrets
 
@@ -136,7 +147,7 @@ Copy `.env.example` to `.env` for local development. `.env` is gitignored and mu
 
 - Required: `DATABASE_URL`, a strong `JWT_SECRET`
 - forumAI: `OPENAI_API_KEY`, optional `AI_DAILY_LIMIT`
-- Temporary App Review fixtures: `DEMO_ACTIVITY_ENABLED=yes`, optional `DEMO_ACTIVITY_MODEL` and `DEMO_ACTIVITY_BATCH_SIZE`; remove or disable after approval
+- Temporary App Review fixtures: `DEMO_ACTIVITY_ENABLED=yes`, optional `DEMO_ACTIVITY_MODEL`, `DEMO_ACTIVITY_VOTE_BATCH_SIZE`, and `DEMO_ACTIVITY_CONTENT_BATCH_SIZE`; remove or disable after approval
 - Durable uploads: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`; private feedback additionally requires `R2_FEEDBACK_BUCKET_NAME`
 - Email/public links: `RESEND_API_KEY`, `EMAIL_FROM`, `SUPPORT_EMAIL`,
   `LEGAL_CONTACT_EMAIL`, `WEB_APP_URL`, and `PUBLIC_API_URL`
@@ -155,7 +166,7 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts; migration 020 identifies fictional accounts and adds the durable temporary activity queue.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts; migration 020 identifies fictional accounts and adds the durable temporary activity queue; migration 021 adds derived article profiles and source-policy eligibility; migration 023 makes structured feedback cascade with account deletion. After the updated API and ingest services are live, run the guarded article-body scrub and verify its database constraint.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.

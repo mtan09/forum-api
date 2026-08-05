@@ -137,7 +137,7 @@ async function loadProfile(userId: string, snapshot: Date): Promise<{
        )
        SELECT w.kind, w.weight, w.event_type, w.dwell_ms,
               p.content AS post_text, p.recommendation_embedding AS post_embedding,
-              a.title AS article_title, a.content AS article_content,
+              a.title AS article_title,
               a.recommendation_embedding AS article_embedding
        FROM weighted w
        LEFT JOIN posts p ON w.kind = 'post' AND p.id = w.item_id
@@ -176,7 +176,7 @@ async function loadProfile(userId: string, snapshot: Date): Promise<{
     const isPost = row.kind === 'post'
     const text = isPost
       ? String(row.post_text ?? '')
-      : `${row.article_title ?? ''}. ${row.article_title ?? ''}. ${row.article_content ?? ''}`
+      : `${row.article_title ?? ''}. ${row.article_title ?? ''}`
     return {
       vector: asVector(isPost ? row.post_embedding : row.article_embedding, text),
       weight: Number(row.weight) + eventWeight(String(row.event_type ?? ''), row.dwell_ms),
@@ -208,7 +208,7 @@ const ARTICLE_DATA_FIELDS = [
   'id', 'url', 'title', 'source', 'media', 'political_lean', 'political_relevance',
   'lean_confidence', 'content_type', 'lean_signals', 'source_lean', 'scorer_version',
   'upvotes', 'downvotes', 'commentcount', 'general_topic_id', 'subtopic_id',
-  'published_at', 'status', 'created_at', 'my_vote', 'my_bookmark',
+  'published_at', 'status', 'created_at', 'ai_context_allowed', 'my_vote', 'my_bookmark',
 ]
 
 const projectData = (row: Record<string, unknown>, fields: string[]) =>
@@ -298,11 +298,11 @@ async function loadArticleCandidates(
           AND g.slug = ANY($3::text[])
         ORDER BY a.published_at DESC NULLS LAST LIMIT 120)
      )
-     SELECT a.id, a.url, a.title, a.source, a.content, a.media, a.political_lean,
+     SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
             a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
             a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
             a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
-            a.recommendation_embedding,
+            a.recommendation_embedding, a.ai_context_allowed,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
             EXISTS(SELECT 1 FROM feed_events fe WHERE fe.user_id = $1 AND fe.item_type = 'article' AND fe.item_id = a.id AND fe.event_type = 'impression' AND fe.created_at > $2 - INTERVAL '7 days') AS recently_seen,
@@ -387,7 +387,7 @@ export async function personalizedFeed(input: {
       authorId: null,
       embedding: asVector(
         row.recommendation_embedding,
-        `${row.title ?? ''}. ${row.title ?? ''}. ${row.content ?? ''}`
+        `${row.title ?? ''}. ${row.title ?? ''}`
       ),
       upvotes: Number(row.upvotes ?? 0),
       downvotes: Number(row.downvotes ?? 0),

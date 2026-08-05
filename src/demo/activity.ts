@@ -5,12 +5,14 @@ import { semanticEmbedding } from '../recommendation/semantic'
 import { scorePost } from '../scoring/score'
 import { captureException } from '../lib/sentry'
 import { demoBio, DEMO_PERSONAS, type DemoPersona } from './personas'
-import { generateDemoComment, generateDemoPost } from './generate'
+import { generateDemoComment, generateDemoPost, generateFallbackDemoPost } from './generate'
 
 export type DemoActivityKind =
   | 'post'
   | 'post_comment'
   | 'post_vote'
+  | 'article_comment'
+  | 'article_vote'
   | 'debate_comment'
   | 'debate_vote'
   | 'comment_vote'
@@ -46,6 +48,47 @@ export function scheduledOffsetMinutes(key: string): number {
   // Five minutes to twelve hours: frequent enough for a short review window,
   // but not a synchronized burst that looks like a seed script ran.
   return 5 + Math.floor(hashUnit(key) * 715)
+}
+
+export function articleEngagementOffsetMinutes(key: string): number {
+  // Incoming coverage should gain visible community activity during the same
+  // review session, without every fictional account reacting in one burst.
+  return 5 + Math.floor(hashUnit(key) * 101)
+}
+
+export function demoArticleVoterCount(articleId: string, availablePersonas: number): number {
+  if (availablePersonas <= 0) return 0
+  return Math.min(availablePersonas, 2 + Math.floor(hashUnit(`${articleId}:voters`) * 4))
+}
+
+export function demoArticleShouldReceiveComment(articleId: string, clustered: boolean): boolean {
+  // Clustered coverage is more likely to be important enough for a thread.
+  // Unclustered cards still occasionally receive a reaction, but comments do
+  // not become uniform or create an unbounded generation bill.
+  return hashUnit(`${articleId}:comment`) < (clustered ? 0.20 : 0.08)
+}
+
+export function demoPersonaPostsOnDay(index: number, ordinal: number): boolean {
+  // Each persona writes on two days of every three-day rotation: roughly
+  // 20-21 concise posts daily across the 31-account review community.
+  return (index + ordinal) % 3 !== 2
+}
+
+export type DemoPerspective = 'left' | 'center' | 'right'
+
+export function demoPerspective(lean: number): DemoPerspective {
+  if (lean < 0.42) return 'left'
+  if (lean > 0.58) return 'right'
+  return 'center'
+}
+
+// Persona lean is a generation-quality expectation only. The score still
+// comes exclusively from the final post text through scorePost().
+export function demoScoreMatchesPersona(lean: number, position: number | null): boolean {
+  const expected = demoPerspective(lean)
+  if (expected === 'center') return true
+  if (position == null) return false
+  return expected === 'left' ? position < 0.46 : position > 0.54
 }
 
 function appDay(now = new Date()): string {
@@ -108,31 +151,47 @@ async function insertJob(input: {
   targetId?: string
   payload?: Record<string, unknown>
   suffix: string
-}): Promise<void> {
-  const dedupeKey = `${input.day}:${input.kind}:${input.userId}:${input.suffix}`
-  const scheduledFor = new Date(Date.now() + scheduledOffsetMinutes(dedupeKey) * 60_000)
-  await query(
+  dedupeKey?: string
+  offsetMinutes?: number
+  runQuery?: (text: string, values: unknown[]) => Promise<{ rows: unknown[] }>
+}): Promise<boolean> {
+  const dedupeKey = input.dedupeKey ?? `${input.day}:${input.kind}:${input.userId}:${input.suffix}`
+  const scheduledFor = new Date(
+    Date.now() + (input.offsetMinutes ?? scheduledOffsetMinutes(dedupeKey)) * 60_000
+  )
+  const result = await (input.runQuery ?? query)(
     `INSERT INTO demo_activity_jobs
        (user_id, kind, target_id, payload, scheduled_for, dedupe_key)
      VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (dedupe_key) DO NOTHING`,
+     ON CONFLICT (dedupe_key) DO NOTHING
+     RETURNING id`,
     [input.userId, input.kind, input.targetId ?? null, input.payload ?? {}, scheduledFor, dedupeKey]
   )
+  return result.rows.length > 0
+}
+
+function articleAffinity(
+  persona: PersonaRow,
+  article: { id: string; title: string; source: string; topic: string }
+): number {
+  const haystack = `${article.title} ${article.source} ${article.topic}`.toLowerCase()
+  const interestMatches = persona.interests.filter((interest) => {
+    const terms = interest.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length >= 4)
+    return terms.some((term) => haystack.includes(term))
+  }).length
+  return hashUnit(`${article.id}:${persona.cadenceSeed}:affinity`) + Math.min(interestMatches, 2) * 0.7
 }
 
 async function planDailyActivity(personas: PersonaRow[]): Promise<number> {
   if (personas.length === 0) return 0
   const day = appDay()
   const ordinal = dayNumber(day)
-  const before = await query(
-    `SELECT count(*)::int AS count FROM demo_activity_jobs WHERE dedupe_key LIKE $1`,
-    [`${day}:%`]
-  )
+  let planned = 0
 
-  // Every persona authors a fresh post during each three-day rotation.
-  const posters = personas.filter((_, index) => (index + ordinal) % 3 === 0)
+  // Every persona authors two concise posts during each three-day rotation.
+  const posters = personas.filter((_, index) => demoPersonaPostsOnDay(index, ordinal))
   for (const persona of posters) {
-    await insertJob({ day, userId: persona.userId, kind: 'post', suffix: 'daily' })
+    planned += Number(await insertJob({ day, userId: persona.userId, kind: 'post', suffix: 'daily' }))
   }
 
   const recentPosts = await query(
@@ -158,15 +217,15 @@ async function planDailyActivity(personas: PersonaRow[]): Promise<number> {
     if (targets.length > 0) {
       const target = targets[Math.floor(hashUnit(`${day}:post:${persona.cadenceSeed}`) * targets.length)]
       if ((index + ordinal) % 2 === 0) {
-        await insertJob({
+        planned += Number(await insertJob({
           day,
           userId: persona.userId,
           kind: 'post_comment',
           targetId: String(target.id),
           suffix: String(target.id),
-        })
+        }))
       }
-      await insertJob({
+      planned += Number(await insertJob({
         day,
         userId: persona.userId,
         kind: 'post_vote',
@@ -179,22 +238,115 @@ async function planDailyActivity(personas: PersonaRow[]): Promise<number> {
           ),
         },
         suffix: String(target.id),
-      })
+      }))
     }
 
     if (recentComments.rows.length > 0 && (index + ordinal) % 3 === 0) {
       const candidates = recentComments.rows.filter((comment) => comment.user_id !== persona.userId)
       if (candidates.length > 0) {
         const target = candidates[Math.floor(hashUnit(`${day}:comment:${persona.cadenceSeed}`) * candidates.length)]
-        await insertJob({
+        planned += Number(await insertJob({
           day,
           userId: persona.userId,
           kind: 'comment_vote',
           targetId: String(target.id),
           payload: { direction: hashUnit(`${day}:${target.id}:comment-vote`) < 0.82 ? 'up' : 'down' },
           suffix: String(target.id),
-        })
+        }))
       }
+    }
+  }
+
+  // Give every incoming feed-eligible publisher card a small, coherent sample
+  // of fictional community reactions. Selecting only articles with no prior
+  // article-vote job lets a bounded planning pass eventually cover a burst of
+  // any size instead of permanently skipping everything after the newest 30.
+  // Global article/persona keys prevent duplicates across cron passes.
+  const incomingArticles = await query(
+    `SELECT a.id, a.title, a.source,
+            COALESCE(a.political_lean, a.source_lean) AS position,
+            COALESCE(g.name, '') AS topic,
+            a.subtopic_id
+     FROM articles a
+     LEFT JOIN general_topics g ON g.id = a.general_topic_id
+     WHERE a.status = 'ready'
+       AND a.created_at >= NOW() - INTERVAL '24 hours'
+       AND COALESCE(a.published_at, a.created_at) <= NOW()
+       AND a.title IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM demo_activity_jobs job
+         WHERE job.kind = 'article_vote' AND job.target_id = a.id::text
+       )
+     ORDER BY a.created_at
+     LIMIT 200`
+  )
+  for (const row of incomingArticles.rows) {
+    const article = {
+      id: String(row.id),
+      title: String(row.title),
+      source: String(row.source ?? 'Publisher'),
+      topic: String(row.topic ?? ''),
+      position: row.position == null ? null : Number(row.position),
+    }
+    const ranked = [...personas].sort(
+      (left, right) => articleAffinity(right, article) - articleAffinity(left, article)
+    )
+    // Plan one article atomically. If a process exits halfway through, the
+    // NOT EXISTS selector can retry the entire card on the next cron pass.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const runQuery = (text: string, values: unknown[]) => client.query(text, values)
+      let articlePlanned = 0
+      const voters = ranked.slice(0, demoArticleVoterCount(article.id, ranked.length))
+      for (const persona of voters) {
+        const dedupeKey = `article:${article.id}:vote:${persona.userId}`
+        articlePlanned += Number(await insertJob({
+          day,
+          userId: persona.userId,
+          kind: 'article_vote',
+          targetId: article.id,
+          payload: {
+            direction: demoVoteDirection(
+              persona.lean,
+              article.position,
+              `${article.id}:${persona.userId}:article-vote`
+            ),
+          },
+          suffix: article.id,
+          dedupeKey,
+          offsetMinutes: articleEngagementOffsetMinutes(dedupeKey),
+          runQuery,
+        }))
+      }
+
+      // A minority also receive one headline-grounded fictional comment, with
+      // a modest preference for multi-source stories. Votes provide broad
+      // visible activity; generated prose stays rare.
+      if (
+        ranked.length > 0 &&
+        demoArticleShouldReceiveComment(article.id, row.subtopic_id != null)
+      ) {
+        const commenter = ranked[0]
+        const dedupeKey = `article:${article.id}:comment:${commenter.userId}`
+        articlePlanned += Number(await insertJob({
+          day,
+          userId: commenter.userId,
+          kind: 'article_comment',
+          targetId: article.id,
+          suffix: article.id,
+          dedupeKey,
+          offsetMinutes: articleEngagementOffsetMinutes(dedupeKey),
+          runQuery,
+        }))
+      }
+      await client.query('COMMIT')
+      planned += articlePlanned
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
     }
   }
 
@@ -214,39 +366,62 @@ async function planDailyActivity(personas: PersonaRow[]): Promise<number> {
     for (const persona of voters) {
       const jitter = (hashUnit(`${day}:${debate.id}:${persona.userId}:pin`) - 0.5) * 0.24
       const position = Math.max(0.02, Math.min(0.98, persona.lean + jitter))
-      await insertJob({
+      planned += Number(await insertJob({
         day,
         userId: persona.userId,
         kind: 'debate_vote',
         targetId: String(debate.id),
         payload: { position: Number(position.toFixed(3)) },
         suffix: String(debate.id),
-      })
+      }))
     }
     for (const persona of ranked.slice(12, 14)) {
-      await insertJob({
+      planned += Number(await insertJob({
         day,
         userId: persona.userId,
         kind: 'debate_comment',
         targetId: String(debate.id),
         suffix: String(debate.id),
-      })
+      }))
     }
   }
 
-  const after = await query(
-    `SELECT count(*)::int AS count FROM demo_activity_jobs WHERE dedupe_key LIKE $1`,
-    [`${day}:%`]
-  )
-  return Number(after.rows[0]?.count ?? 0) - Number(before.rows[0]?.count ?? 0)
+  return planned
 }
 
-async function claimDueJob(): Promise<ActivityJob | null> {
+type ActivityLane = 'vote' | 'content'
+
+const VOTE_KINDS: DemoActivityKind[] = [
+  'article_vote',
+  'post_vote',
+  'comment_vote',
+  'debate_vote',
+]
+const CONTENT_KINDS: DemoActivityKind[] = [
+  'post',
+  'article_comment',
+  'post_comment',
+  'debate_comment',
+]
+
+async function claimDueJob(lane: ActivityLane): Promise<ActivityJob | null> {
+  const kinds = lane === 'vote' ? VOTE_KINDS : CONTENT_KINDS
   const result = await query(
     `WITH next_job AS (
        SELECT id FROM demo_activity_jobs
-       WHERE status = 'queued' AND scheduled_for <= NOW()
-       ORDER BY scheduled_for, id
+       WHERE status = 'queued' AND scheduled_for <= NOW() AND kind = ANY($1::text[])
+       ORDER BY
+         CASE kind
+           WHEN 'article_vote' THEN 0
+           WHEN 'post' THEN 0
+           WHEN 'article_comment' THEN 1
+           WHEN 'post_vote' THEN 1
+           WHEN 'comment_vote' THEN 2
+           WHEN 'post_comment' THEN 2
+           ELSE 3
+         END,
+         scheduled_for,
+         id
        FOR UPDATE SKIP LOCKED
        LIMIT 1
      )
@@ -254,7 +429,8 @@ async function claimDueJob(): Promise<ActivityJob | null> {
      SET status = 'running', attempts = attempts + 1, last_error = NULL
      FROM next_job
      WHERE job.id = next_job.id
-     RETURNING job.id, job.user_id, job.kind, job.target_id, job.payload, job.attempts`
+     RETURNING job.id, job.user_id, job.kind, job.target_id, job.payload, job.attempts`,
+    [kinds]
   )
   return (result.rows[0] as ActivityJob | undefined) ?? null
 }
@@ -280,8 +456,44 @@ async function personaForJob(userId: string): Promise<DemoPersona | null> {
 }
 
 async function createPost(job: ActivityJob, persona: DemoPersona): Promise<void> {
-  const generated = await generateDemoPost(persona)
-  const score = scorePost(generated.text)
+  const expected = demoPerspective(persona.lean)
+  let generated: Awaited<ReturnType<typeof generateDemoPost>>
+  let score: ReturnType<typeof scorePost>
+  let fallbackUsed = false
+
+  try {
+    generated = await generateDemoPost(persona)
+    score = scorePost(generated.text)
+    if (!demoScoreMatchesPersona(persona.lean, score.position)) {
+      const observed = score.position == null
+        ? 'the wording did not express a classifiable policy stance'
+        : `the wording read as ${score.position < 0.5 ? 'left' : 'right'} rather than ${expected}`
+      generated = await generateDemoPost(
+        persona,
+        `${observed}. Rewrite around one explicit policy the persona supports or opposes. Preserve nuance and natural language.`
+      )
+      score = scorePost(generated.text)
+    }
+  } catch (error) {
+    console.warn(
+      `[demo] generated post unavailable for ${persona.username}; using moderated fallback:`,
+      error instanceof Error ? error.message : String(error)
+    )
+    generated = await generateFallbackDemoPost(persona)
+    score = scorePost(generated.text)
+    fallbackUsed = true
+  }
+
+  if (!demoScoreMatchesPersona(persona.lean, score.position)) {
+    if (!fallbackUsed) {
+      generated = await generateFallbackDemoPost(persona)
+      score = scorePost(generated.text)
+      fallbackUsed = true
+    }
+    if (!demoScoreMatchesPersona(persona.lean, score.position)) {
+      throw new Error(`Fallback ${expected} demo post remained directionally inconsistent`)
+    }
+  }
   const topic = await matchTopic(`${generated.text} ${generated.hashtags.join(' ')}`)
   await query(
     `INSERT INTO posts
@@ -343,6 +555,45 @@ async function createComment(job: ActivityJob, persona: DemoPersona): Promise<vo
     return
   }
 
+  if (job.kind === 'article_comment') {
+    const target = await query(
+      `SELECT id, title, source
+       FROM articles
+       WHERE id::text = $1 AND status = 'ready'`,
+      [job.target_id]
+    )
+    if (!target.rows[0]) throw new Error('SKIP: article target is unavailable')
+    const content = await generateDemoComment(persona, {
+      kind: 'article',
+      text: String(target.rows[0].title ?? ''),
+      author: String(target.rows[0].source ?? 'Publisher'),
+    })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const inserted = await client.query(
+        `INSERT INTO comments (user_id, article_id, content, is_demo_generated, demo_job_id)
+         VALUES ($1, $2, $3, TRUE, $4)
+         ON CONFLICT (demo_job_id) WHERE demo_job_id IS NOT NULL DO NOTHING
+         RETURNING id`,
+        [job.user_id, job.target_id, content, job.id]
+      )
+      if (inserted.rows[0]) {
+        await client.query(
+          'UPDATE articles SET commentcount = commentcount + 1 WHERE id::text = $1',
+          [job.target_id]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    return
+  }
+
   const debate = await query('SELECT id, title FROM debates WHERE id::text = $1', [job.target_id])
   if (!debate.rows[0]) throw new Error('SKIP: debate target is unavailable')
   const content = await generateDemoComment(persona, {
@@ -367,6 +618,28 @@ async function executeVote(job: ActivityJob): Promise<void> {
        VALUES ($1, $2, $3)
        ON CONFLICT (user_id, debate_id) DO UPDATE SET position = EXCLUDED.position, created_at = NOW()`,
       [job.user_id, job.target_id, position]
+    )
+    return
+  }
+  if (job.kind === 'article_vote') {
+    const direction = job.payload.direction === 'down' ? 'down' : 'up'
+    const target = await query(
+      `SELECT 1 FROM articles WHERE id::text = $1 AND status = 'ready'`,
+      [job.target_id]
+    )
+    if (!target.rows[0]) throw new Error('SKIP: article vote target is unavailable')
+    await query(
+      `INSERT INTO article_votes (user_id, article_id, direction)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, article_id) DO UPDATE SET direction = EXCLUDED.direction, created_at = NOW()`,
+      [job.user_id, job.target_id, direction]
+    )
+    await query(
+      `UPDATE articles SET
+         upvotes = (SELECT count(*) FROM article_votes WHERE article_id::text = $1 AND direction = 'up'),
+         downvotes = (SELECT count(*) FROM article_votes WHERE article_id::text = $1 AND direction = 'down')
+       WHERE id::text = $1`,
+      [job.target_id]
     )
     return
   }
@@ -410,7 +683,9 @@ async function executeJob(job: ActivityJob): Promise<void> {
   const persona = await personaForJob(job.user_id)
   if (!persona) throw new Error('SKIP: demo persona is inactive or missing')
   if (job.kind === 'post') return createPost(job, persona)
-  if (job.kind === 'post_comment' || job.kind === 'debate_comment') return createComment(job, persona)
+  if (job.kind === 'post_comment' || job.kind === 'article_comment' || job.kind === 'debate_comment') {
+    return createComment(job, persona)
+  }
   return executeVote(job)
 }
 
@@ -440,36 +715,74 @@ async function failJob(job: ActivityJob, error: unknown): Promise<void> {
   if (!retry) captureException(error, { component: 'demo-activity', jobId: job.id, kind: job.kind })
 }
 
-export async function runDemoActivity(limit = 20): Promise<{ planned: number; completed: number; failed: number }> {
+type DemoActivityOptions = {
+  voteLimit?: number
+  contentLimit?: number
+}
+
+function boundedLimit(value: number | undefined, fallback: number, maximum: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.max(0, Math.min(maximum, Math.floor(value!)))
+}
+
+export async function runDemoActivity(
+  options: DemoActivityOptions = {}
+): Promise<{ planned: number; completed: number; failed: number }> {
   if (process.env.DEMO_ACTIVITY_ENABLED !== 'yes') {
     console.log('[demo] activity disabled; set DEMO_ACTIVITY_ENABLED=yes to run')
     return { planned: 0, completed: 0, failed: 0 }
   }
-  const lock = await query("SELECT pg_try_advisory_lock(hashtext('forum-demo-activity')) AS locked")
-  if (!lock.rows[0]?.locked) {
-    console.log('[demo] another activity worker holds the lock; skipping')
-    return { planned: 0, completed: 0, failed: 0 }
-  }
+  const voteLimit = boundedLimit(options.voteLimit, 300, 1_000)
+  const contentLimit = boundedLimit(options.contentLimit, 8, 40)
+  const lockClient = await pool.connect()
   try {
+    await lockClient.query('BEGIN')
+    const lock = await lockClient.query(
+      "SELECT pg_try_advisory_xact_lock(hashtext('forum-demo-activity')) AS locked"
+    )
+    if (!lock.rows[0]?.locked) {
+      console.log('[demo] another activity worker holds the lock; skipping')
+      return { planned: 0, completed: 0, failed: 0 }
+    }
     const personas = await syncPersonas()
     const planned = await planDailyActivity(personas)
     let completed = 0
     let failed = 0
-    for (let index = 0; index < limit; index++) {
-      const job = await claimDueJob()
-      if (!job) break
-      try {
-        await executeJob(job)
-        await finishJob(job, 'completed')
-        completed++
-      } catch (error) {
-        await failJob(job, error)
-        failed++
+    const laneResults: Record<ActivityLane, { completed: number; failed: number }> = {
+      vote: { completed: 0, failed: 0 },
+      content: { completed: 0, failed: 0 },
+    }
+    for (const [lane, limit] of [
+      ['vote', voteLimit],
+      ['content', contentLimit],
+    ] as const) {
+      for (let index = 0; index < limit; index++) {
+        const job = await claimDueJob(lane)
+        if (!job) break
+        try {
+          await executeJob(job)
+          await finishJob(job, 'completed')
+          completed++
+          laneResults[lane].completed++
+        } catch (error) {
+          await failJob(job, error)
+          failed++
+          laneResults[lane].failed++
+        }
       }
     }
-    console.log(`[demo] ${personas.length} personas; ${planned} planned; ${completed} completed; ${failed} retried/failed`)
+    console.log(
+      `[demo] ${personas.length} personas; ${planned} planned; ` +
+      `${laneResults.vote.completed}/${voteLimit} vote jobs and ` +
+      `${laneResults.content.completed}/${contentLimit} content jobs completed; ` +
+      `${failed} retried/failed`
+    )
     return { planned, completed, failed }
   } finally {
-    await query("SELECT pg_advisory_unlock(hashtext('forum-demo-activity'))")
+    // The transaction pins the PgBouncer backend and releases the lock even
+    // if the process exits through an error path. Session locks can leak when
+    // a pooled backend outlives the Node process.
+    await lockClient.query('ROLLBACK').catch(() => undefined)
+    lockClient.release()
   }
 }

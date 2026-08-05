@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 // Deterministic keyword extraction — the shared vocabulary for article
 // hashtags and story clustering. No models: term frequency over the
 // title (weighted 3×) and lead text, minus stopwords. Same input, same
@@ -40,6 +42,78 @@ const WORD_RE = /[a-z][a-z'’-]{2,}/g
 export type Keywords = {
   terms: Map<string, number>   // term -> weight (unigrams + bigrams)
   top: string[]                // highest-weight terms, unigrams first
+  similarityTerms?: Map<string, number> // one-way term hashes for stored article profiles
+}
+
+// Persist only a small, non-sequential feature profile after transient article
+// analysis. It is large enough to preserve clustering/search quality but too
+// bounded to act as a substitute for the publisher's article body.
+export const STORED_KEYWORD_TERM_LIMIT = 48
+export const STORED_CLUSTER_HASH_LIMIT = 512
+export type StoredKeywords = {
+  version: 2
+  terms: [string, number][]
+  cluster_terms: [string, number][]
+  top: string[]
+}
+
+const termHash = (term: string) =>
+  createHash('sha256').update(term).digest('base64url').slice(0, 22)
+
+export function storeKeywords(profile: Keywords): StoredKeywords {
+  const terms = [...profile.terms.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, STORED_KEYWORD_TERM_LIMIT)
+    .map(([term, weight]): [string, number] => [term, Number(weight.toFixed(4))])
+  const allowed = new Set(terms.map(([term]) => term))
+  return {
+    version: 2,
+    terms,
+    cluster_terms: [...profile.terms.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, STORED_CLUSTER_HASH_LIMIT)
+      .map(([term, weight]): [string, number] => [termHash(term), Number(weight.toFixed(4))]),
+    top: profile.top.filter((term) => allowed.has(term)).slice(0, 16),
+  }
+}
+
+export function restoreKeywords(value: unknown, title = ''): Keywords {
+  if (value && typeof value === 'object') {
+    const stored = value as Record<string, unknown>
+    const version = Number(stored.version)
+    if ((version === 1 || version === 2) && Array.isArray(stored.terms)) {
+      const terms = new Map<string, number>()
+      for (const entry of stored.terms.slice(0, STORED_KEYWORD_TERM_LIMIT)) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue
+        const term = String(entry[0]).trim()
+        const weight = Number(entry[1])
+        if (!term || !Number.isFinite(weight) || weight <= 0) continue
+        terms.set(term, weight)
+      }
+      const top: string[] = Array.isArray(stored.top)
+        ? stored.top.map(String).filter((term) => terms.has(term)).slice(0, 16)
+        : [...terms.keys()].slice(0, 16)
+      const similarityTerms: Map<string, number> | undefined =
+        version === 2 && Array.isArray(stored.cluster_terms)
+        ? new Map<string, number>(
+            stored.cluster_terms
+              .slice(0, STORED_CLUSTER_HASH_LIMIT)
+              .filter((entry: unknown) => Array.isArray(entry) && entry.length === 2)
+              .map((entry: unknown) => {
+                const pair = entry as unknown[]
+                return [String(pair[0]), Number(pair[1])] as [string, number]
+              })
+              .filter(([term, weight]) => !!term && Number.isFinite(weight) && weight > 0)
+          )
+        : undefined
+      if (terms.size > 0) return { terms, top, similarityTerms }
+    }
+  }
+  return extractKeywords(title, '')
+}
+
+export function keywordSearchText(profile: StoredKeywords): string {
+  return profile.terms.map(([term]) => term).join(' ')
 }
 
 function normalize(word: string): string {
@@ -80,15 +154,17 @@ export function extractKeywords(title: string, content: string, maxLead = 1500):
 // Similarity between two keyword profiles: weighted overlap normalized by
 // the smaller profile, so a short item can still fully match a long one.
 export function keywordSimilarity(a: Keywords, b: Keywords): number {
+  const termsA = a.similarityTerms ?? a.terms
+  const termsB = b.similarityTerms ?? b.terms
   let shared = 0
   let sumA = 0
   let sumB = 0
-  for (const [term, w] of a.terms) {
+  for (const [term, w] of termsA) {
     sumA += w
-    const wb = b.terms.get(term)
+    const wb = termsB.get(term)
     if (wb !== undefined) shared += Math.min(w, wb)
   }
-  for (const [, w] of b.terms) sumB += w
+  for (const [, w] of termsB) sumB += w
   const denom = Math.min(sumA, sumB)
   return denom > 0 ? shared / denom : 0
 }

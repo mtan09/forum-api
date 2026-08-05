@@ -1,0 +1,72 @@
+// Reviewed regression corpus for the post spectrum. These examples cover
+// direct policy language, natural paraphrases, mixed positions, attribution,
+// negation, and genuinely non-directional political discussion.
+
+export type EvaluationLabel = 'left' | 'center' | 'right' | 'unclassified'
+
+export type EvaluationCase = {
+  label: EvaluationLabel
+  issue: string
+  text: string
+}
+
+export const POST_SCORING_EVALUATION: EvaluationCase[] = [
+  { label: 'left', issue: 'labor', text: 'Who is guaranteeing union labor standards and apprenticeship slots before this public project moves forward?' },
+  { label: 'left', issue: 'labor', text: 'Workers deserve a union and Congress should raise the federal minimum wage.' },
+  { label: 'left', issue: 'public health', text: 'The next administration should fund ventilation upgrades, contact tracing, and county health staffing.' },
+  { label: 'left', issue: 'climate', text: 'We should regulate carbon pollution and fossil fuels instead of accepting another decade of delay.' },
+  { label: 'left', issue: 'housing', text: 'Cities must expand affordable housing and enact meaningful tenant protections.' },
+  { label: 'left', issue: 'education', text: 'States should fund public schools instead of diverting money into vouchers.' },
+  { label: 'left', issue: 'immigration', text: 'Congress should create a permanent legal pathway for DACA recipients and asylum seekers.' },
+  { label: 'left', issue: 'voting', text: 'We need automatic voter registration and broader ballot access.' },
+  { label: 'left', issue: 'public safety', text: 'Congress should end qualified immunity and require real police accountability.' },
+  { label: 'left', issue: 'fiscal policy', text: 'We should raise taxes on billionaires and invest the revenue in public transit.' },
+  { label: 'left', issue: 'foreign policy', text: 'Congress has not voted on this war; unauthorized airstrikes must stop.' },
+  { label: 'left', issue: 'foreign policy', text: 'The Constitution has no convenient-war exception. Congress must vote before another service member is sent.' },
+  { label: 'left', issue: 'foreign policy', text: 'Diplomacy is not weakness when civilian deaths are treated as a footnote to strategy.' },
+  { label: 'left', issue: 'veterans', text: 'Congress must budget for lifelong veterans care before authorizing another open-ended war.' },
+  { label: 'left', issue: 'technology', text: 'We should enforce antitrust law against big tech and require algorithm transparency.' },
+  { label: 'left', issue: 'technology', text: 'The AI transparency requirements are lighter than what serious labs already do; compliance worries are overstated.' },
+  { label: 'left', issue: 'economic power', text: 'The real job is defending ordinary people’s rights when political power gets abused.' },
+  { label: 'left', issue: 'political alignment', text: 'Republicans turned the oversight fund into a diversion that protects political power.' },
+  { label: 'left', issue: 'climate', text: 'Wildfire blame is theater; fire management budgets on both sides of the border are the actual lever.' },
+  { label: 'left', issue: 'climate', text: 'The grid interconnection queue is blocking the energy transition; five-year waits are a policy failure.' },
+  { label: 'left', issue: 'voting', text: 'Most election fraud cases cited in the speech were dismissed or unsupported by evidence.' },
+  { label: 'left', issue: 'drug enforcement', text: 'Most fentanyl is seized at legal ports of entry, so Congress should fund the scanners.' },
+  { label: 'right', issue: 'labor', text: 'Congress should reject government wage mandates that small employers cannot absorb.' },
+  { label: 'right', issue: 'public health', text: 'States should limit federal vaccine mandates and return those decisions to families.' },
+  { label: 'right', issue: 'energy', text: 'America should expand domestic oil production and approve new pipelines.' },
+  { label: 'right', issue: 'housing', text: 'Cities should reduce zoning restrictions and let private builders add more homes.' },
+  { label: 'right', issue: 'education', text: 'Parents should control curriculum decisions and states should expand school choice.' },
+  { label: 'right', issue: 'immigration', text: 'The government must strengthen border enforcement and restrict asylum abuse.' },
+  { label: 'right', issue: 'voting', text: 'States should require voter identification, signature verification, and paper ballots.' },
+  { label: 'right', issue: 'public safety', text: 'Cities need to hire more officers and impose tougher sentences for violent crime.' },
+  { label: 'right', issue: 'fiscal policy', text: 'Congress should cut federal spending, lower corporate taxes, and reduce compliance costs.' },
+  { label: 'right', issue: 'foreign policy', text: 'We must strengthen military readiness because deterrence prevents hostile regimes from advancing.' },
+  { label: 'right', issue: 'foreign policy', text: 'Iran cannot be allowed to threaten U.S. forces without consequences; the mission must restore deterrence.' },
+  { label: 'right', issue: 'foreign policy', text: 'Half-measures cost lives. Decisive action should destroy the regime’s military capacity and finish the mission.' },
+  { label: 'right', issue: 'civil rights', text: 'Lawmakers should protect religious liberty and reject compelled speech requirements.' },
+  { label: 'right', issue: 'technology', text: 'Congress should limit government pressure on social media and protect innovation from AI mandates.' },
+  { label: 'right', issue: 'political alignment', text: 'Elite institutions love certainty until they are under oath, while Democrats dodge basic questions.' },
+  { label: 'right', issue: 'education', text: 'Officials must answer to families, and parents should read the curriculum and demand transparency.' },
+  { label: 'right', issue: 'taxpayer restraint', text: 'I do not want my tax dollars funding political payback inside the Justice Department.' },
+  { label: 'right', issue: 'energy', text: 'Energy jobs depend on reliability and U.S. jobs tied to domestic production.' },
+  { label: 'right', issue: 'public safety', text: 'We protect victims, document the evidence, and leadership decides fast when misconduct surfaces.' },
+  { label: 'right', issue: 'education', text: 'The phone-free school pilot sent test scores up and fights down; sometimes the paternalists are right.' },
+  { label: 'right', issue: 'fiscal policy', text: 'Social Security faces a trust fund cliff while both parties hide; the math does not care about politics.' },
+  { label: 'right', issue: 'agriculture', text: 'People complain about farm bill subsidies while input costs doubled and rural producers absorb the bill.' },
+  { label: 'center', issue: 'immigration', text: 'Congress should secure the border and create a path to citizenship for DACA recipients.' },
+  { label: 'center', issue: 'education', text: 'Fund public schools, but also let low-income families use carefully regulated school-choice programs.' },
+  { label: 'center', issue: 'energy', text: 'We need measurable emissions cuts and more domestic nuclear and gas capacity for reliability.' },
+  { label: 'unclassified', issue: 'nonpolitical', text: 'I had a sandwich for lunch and walked the dog afterward.' },
+  { label: 'unclassified', issue: 'process', text: 'Congress should publish the audit and explain who approved the fund.' },
+  { label: 'unclassified', issue: 'reported speech', text: 'A reporter said the governor wants to expand domestic oil production, but I have not taken a position.' },
+  { label: 'unclassified', issue: 'methodology', text: 'What study design and measurable outcomes should Congress use when reviewing pandemic guidance?' },
+  { label: 'unclassified', issue: 'candidate accountability', text: 'Voters deserve a clear process for reviewing the allegations before the campaign continues.' },
+  { label: 'unclassified', issue: 'institutional process', text: 'Where should the boundary sit between DOJ funding, confirmations, and prosecutorial independence?' },
+  { label: 'unclassified', issue: 'quotation', text: 'The senator said “we must secure the border,” but the article did not evaluate the proposal.' },
+  { label: 'unclassified', issue: 'explicit disclaimer', text: 'The mayor supports rent control and the challenger opposes it. I am still undecided.' },
+  { label: 'unclassified', issue: 'party mention', text: 'Democrats and Republicans in my neighborhood complain about the same prices and schools.' },
+  { label: 'unclassified', issue: 'reported partisan speech', text: 'The report says Trump criticized Democrats during the hearing.' },
+  { label: 'unclassified', issue: 'reported program date', text: 'The trustees reported the projected Social Security trust-fund date in their annual table.' },
+]
