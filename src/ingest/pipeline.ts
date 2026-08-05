@@ -159,7 +159,17 @@ export async function runIngest(): Promise<IngestStats> {
   const lockClient = await pool.connect()
   let runId: string | null = null
   let locked = false
+  let lockHeartbeat: NodeJS.Timeout | null = null
+  let heartbeatInFlight: Promise<void> | null = null
+  let lockFailure: unknown = null
+  const onLockError = (error: Error) => {
+    lockFailure ??= error
+  }
   try {
+    // The advisory lock lives on this checked-out PgBouncer connection. The
+    // ingest work itself uses the regular pool, so without a heartbeat this
+    // transaction is otherwise idle long enough for Neon to terminate it.
+    lockClient.on('error', onLockError)
     await lockClient.query('BEGIN')
     const lock = await lockClient.query(
       "SELECT pg_try_advisory_xact_lock(hashtext('forum-hourly-ingest')) AS locked"
@@ -173,6 +183,33 @@ export async function runIngest(): Promise<IngestStats> {
       console.log('[ingest] another run holds the advisory lock; skipping')
       return stats
     }
+
+    const heartbeat = () => {
+      if (heartbeatInFlight) return
+      heartbeatInFlight = lockClient.query('SELECT 1')
+        .then(() => undefined)
+        .catch((error) => {
+          lockFailure ??= error
+        })
+        .finally(() => {
+          heartbeatInFlight = null
+        })
+    }
+    lockHeartbeat = setInterval(heartbeat, 60_000)
+    lockHeartbeat.unref()
+
+    // Holding the advisory lock proves that no live ingest worker owns it.
+    // Any older "running" rows were abandoned by a crashed process.
+    await query(
+      `UPDATE ingest_runs
+       SET status = 'failed', completed_at = NOW(),
+           duration_ms = LEAST(
+             2147483647,
+             GREATEST(0, EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000)
+           )::int,
+           error = COALESCE(error, 'Previous ingest process exited before recording completion.')
+       WHERE status = 'running' AND completed_at IS NULL`
+    )
 
     const run = await query(`INSERT INTO ingest_runs DEFAULT VALUES RETURNING id`)
     runId = run.rows[0].id
@@ -189,10 +226,12 @@ export async function runIngest(): Promise<IngestStats> {
         if (!stats.sourcesFailed.includes(source.name)) stats.sourcesFailed.push(source.name)
         console.warn(`[ingest] source ${source.name} failed: ${(err as Error).message}`)
       }
+      if (lockFailure) throw lockFailure
     }
 
     // Re-cluster whenever fresh articles arrived so hot topics stay current.
     if (stats.inserted > 0) await clusterAndPublish()
+    if (lockFailure) throw lockFailure
 
     const status = stats.sourcesFailed.length || stats.feedsFailed ? 'partial' : 'success'
     const duration = Date.now() - started
@@ -276,8 +315,12 @@ export async function runIngest(): Promise<IngestStats> {
     throw err
   } finally {
     // Transaction-scoped locks are safe through PgBouncer and cannot remain
-    // attached to a pooled Neon backend after this process exits.
+    // attached to a pooled Neon backend after this process exits. Stop and
+    // drain the heartbeat before rolling the transaction back.
+    if (lockHeartbeat) clearInterval(lockHeartbeat)
+    await Promise.resolve(heartbeatInFlight).catch(() => undefined)
     await lockClient.query('ROLLBACK').catch(() => {})
+    lockClient.removeListener('error', onLockError)
     lockClient.release()
   }
 }

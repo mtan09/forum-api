@@ -5,6 +5,10 @@ describe('ingest reliability', () => {
   it('recognizes database wake-up and connection failures', () => {
     expect(isDatabaseConnectionError(new Error('Connection terminated due to connection timeout'))).toBe(true)
     expect(isDatabaseConnectionError({ code: '57P03', message: 'starting up' })).toBe(true)
+    expect(isDatabaseConnectionError({
+      code: '25P03',
+      message: 'terminating connection due to idle-in-transaction timeout',
+    })).toBe(true)
     expect(isDatabaseConnectionError(new Error('RSS returned HTTP 404'))).toBe(false)
   })
 
