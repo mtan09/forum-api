@@ -9,6 +9,7 @@ import { requireAuth } from '../middleware/auth'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
 import type { AppEnv } from '../types'
+import { articleSocialFields, postSocialFields } from '../lib/content-social'
 
 const users = new Hono<AppEnv>()
 
@@ -449,11 +450,12 @@ users.get('/me/posts', requireAuth, async (c) => {
             p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
             u.username, u.avatar_url, u.is_demo,
             v.direction AS my_vote,
-            EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
+            EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
+            ${postSocialFields('p', '$1')}
      FROM posts p
      JOIN userdata u ON u.id = p.user_id
      LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
-     WHERE p.user_id = $1
+     WHERE p.user_id = $1 AND NOT p.hidden
      ORDER BY p.created_at DESC
      LIMIT 100`,
     [userId]
@@ -492,11 +494,12 @@ users.get('/me/upvoted', requireAuth, async (c) => {
               u.username, u.avatar_url, u.is_demo,
               'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
+              ${postSocialFields('p', '$1')},
               v.created_at AS voted_at
        FROM votes v
        JOIN posts p ON p.id = v.post_id
        JOIN userdata u ON u.id = p.user_id
-       WHERE v.user_id = $1 AND v.direction = 'up'`,
+       WHERE v.user_id = $1 AND v.direction = 'up' AND NOT p.hidden`,
       [userId]
     ),
     query(
@@ -506,10 +509,11 @@ users.get('/me/upvoted', requireAuth, async (c) => {
          a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
          a.ai_context_allowed, 'up' AS my_vote,
               EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+              ${articleSocialFields('a', '$1')},
               v.created_at AS voted_at
        FROM article_votes v
        JOIN articles a ON a.id = v.article_id
-       WHERE v.user_id = $1 AND v.direction = 'up'`,
+       WHERE v.user_id = $1 AND v.direction = 'up' AND a.status = 'ready'`,
       [userId]
     ),
   ])

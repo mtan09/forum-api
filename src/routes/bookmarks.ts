@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { query } from '../db'
 import { requireAuth } from '../middleware/auth'
+import { articleSocialFields, postSocialFields } from '../lib/content-social'
 import type { AppEnv } from '../types'
 
 const bookmarks = new Hono<AppEnv>()
@@ -52,12 +53,13 @@ bookmarks.get('/', requireAuth, async (c) => {
               u.username, u.avatar_url, u.is_demo,
               v.direction AS my_vote,
               TRUE AS my_bookmark,
+              ${postSocialFields('p', '$1')},
               b.created_at AS saved_at
        FROM bookmarks b
        JOIN posts p ON p.id = b.post_id
        JOIN userdata u ON u.id = p.user_id
        LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
-       WHERE b.user_id = $1`,
+       WHERE b.user_id = $1 AND NOT p.hidden`,
       [userId]
     ),
     query(
@@ -65,11 +67,12 @@ bookmarks.get('/', requireAuth, async (c) => {
          a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
          a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
          a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
-         a.ai_context_allowed, v.direction AS my_vote, TRUE AS my_bookmark, b.created_at AS saved_at
+         a.ai_context_allowed, v.direction AS my_vote, TRUE AS my_bookmark,
+         ${articleSocialFields('a', '$1')}, b.created_at AS saved_at
        FROM bookmarks b
        JOIN articles a ON a.id = b.article_id
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
-       WHERE b.user_id = $1`,
+       WHERE b.user_id = $1 AND a.status = 'ready'`,
       [userId]
     ),
   ])

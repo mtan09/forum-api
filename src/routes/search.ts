@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { query } from '../db'
 import { requireAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
+import { articleSocialFields, postSocialFields } from '../lib/content-social'
 
 const search = new Hono<AppEnv>()
 
@@ -146,7 +147,8 @@ search.get('/', requireAuth, async (c) => {
               EXISTS(
                 SELECT 1 FROM bookmarks b
                 WHERE b.post_id = p.id AND b.user_id = $1
-              ) AS my_bookmark
+              ) AS my_bookmark,
+              ${postSocialFields('p', '$1')}
        FROM posts p
        JOIN userdata u ON u.id = p.user_id
        LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
@@ -175,7 +177,8 @@ search.get('/', requireAuth, async (c) => {
               EXISTS(
                 SELECT 1 FROM bookmarks b
                 WHERE b.article_id = a.id AND b.user_id = $1
-              ) AS my_bookmark
+              ) AS my_bookmark,
+              ${articleSocialFields('a', '$1')}
        FROM articles a
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
        WHERE ${articleMatch}

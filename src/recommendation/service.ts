@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { query } from '../db'
+import { articleSocialFields, postSocialFields } from '../lib/content-social'
 import {
   type CandidateKind,
   type ContentPreference,
@@ -202,13 +203,17 @@ const POST_DATA_FIELDS = [
   'id', 'user_id', 'content', 'media_url', 'general_topic_id', 'position',
   'position_confidence', 'position_signals', 'scorer_version', 'hashtags',
   'upvotes', 'downvotes', 'commentcount', 'created_at', 'username', 'avatar_url', 'is_demo',
-  'my_vote', 'my_bookmark',
+  'my_vote', 'my_bookmark', 'repost_count', 'my_repost', 'quoted_content',
+  'reposted_by_user_id', 'reposted_by_username', 'reposted_by_avatar_url',
+  'reposted_by_is_demo', 'reposted_at',
 ]
 const ARTICLE_DATA_FIELDS = [
   'id', 'url', 'title', 'source', 'media', 'political_lean', 'political_relevance',
   'lean_confidence', 'content_type', 'lean_signals', 'source_lean', 'scorer_version',
   'upvotes', 'downvotes', 'commentcount', 'general_topic_id', 'subtopic_id',
   'published_at', 'status', 'created_at', 'ai_context_allowed', 'my_vote', 'my_bookmark',
+  'repost_count', 'my_repost', 'reposted_by_user_id', 'reposted_by_username',
+  'reposted_by_avatar_url', 'reposted_by_is_demo', 'reposted_at',
 ]
 
 const projectData = (row: Record<string, unknown>, fields: string[]) =>
@@ -217,7 +222,8 @@ const projectData = (row: Record<string, unknown>, fields: string[]) =>
 async function loadPostCandidates(
   userId: string,
   snapshot: Date,
-  topicSlugs: string[]
+  topicSlugs: string[],
+  includeFollowedReposts: boolean,
 ): Promise<Record<string, unknown>[]> {
   const result = await query(
     `WITH candidate_ids AS (
@@ -241,6 +247,14 @@ async function loadPostCandidates(
         WHERE f.follower_id = $1 AND f.status = 'accepted'
           AND NOT p.hidden AND p.created_at <= $2
         ORDER BY p.created_at DESC LIMIT 100)
+       UNION
+       (SELECT r.post_id
+        FROM reposts r
+        JOIN follows f ON f.followee_id = r.user_id
+        JOIN posts p ON p.id = r.post_id
+        WHERE $4::boolean AND f.follower_id = $1 AND f.status = 'accepted'
+          AND r.user_id <> $1 AND r.created_at <= $2 AND NOT p.hidden
+        ORDER BY r.created_at DESC LIMIT 120)
      )
      SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
             p.position_confidence, p.position_signals, p.scorer_version, p.hashtags,
@@ -248,7 +262,14 @@ async function loadPostCandidates(
             p.recommendation_embedding, u.username, u.avatar_url, u.is_demo,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
-            EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = p.user_id AND f.status = 'accepted') AS followed,
+            ${postSocialFields('p', '$1')},
+            (EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = p.user_id AND f.status = 'accepted')
+              OR followed_repost.user_id IS NOT NULL) AS followed,
+            followed_repost.user_id AS reposted_by_user_id,
+            followed_repost.username AS reposted_by_username,
+            followed_repost.avatar_url AS reposted_by_avatar_url,
+            followed_repost.is_demo AS reposted_by_is_demo,
+            followed_repost.created_at AS reposted_at,
             EXISTS(SELECT 1 FROM feed_events fe WHERE fe.user_id = $1 AND fe.item_type = 'post' AND fe.item_id = p.id AND fe.event_type = 'impression' AND fe.created_at > $2 - INTERVAL '7 days') AS recently_seen,
             COALESCE(metrics.impressions, 0)::int AS impressions,
             COALESCE(metrics.opens, 0)::int AS opens,
@@ -257,6 +278,22 @@ async function loadPostCandidates(
      JOIN posts p ON p.id = ids.id
      JOIN userdata u ON u.id = p.user_id
      LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
+     LEFT JOIN LATERAL (
+       SELECT r.user_id, reposter.username, reposter.avatar_url, reposter.is_demo, r.created_at
+       FROM reposts r
+       JOIN follows f ON f.followee_id = r.user_id
+         AND f.follower_id = $1 AND f.status = 'accepted'
+       JOIN userdata reposter ON reposter.id = r.user_id
+       WHERE $4::boolean AND r.post_id = p.id AND r.user_id <> $1
+         AND r.created_at <= $2
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks blocked
+           WHERE (blocked.blocker_id = $1 AND blocked.blocked_id = r.user_id)
+              OR (blocked.blocker_id = r.user_id AND blocked.blocked_id = $1)
+         )
+       ORDER BY r.created_at DESC
+       LIMIT 1
+     ) followed_repost ON TRUE
      LEFT JOIN LATERAL (
        SELECT count(*) FILTER (WHERE event_type = 'impression') AS impressions,
               count(*) FILTER (WHERE event_type IN ('open', 'outbound_open')) AS opens,
@@ -270,7 +307,7 @@ async function loadPostCandidates(
      WHERE cp.item_id IS NULL
        AND NOT EXISTS(SELECT 1 FROM blocks bl WHERE bl.blocker_id = $1 AND bl.blocked_id = p.user_id)
      LIMIT 350`,
-    [userId, snapshot, topicSlugs]
+    [userId, snapshot, topicSlugs, includeFollowedReposts]
   )
   return result.rows
 }
@@ -278,7 +315,8 @@ async function loadPostCandidates(
 async function loadArticleCandidates(
   userId: string,
   snapshot: Date,
-  topicSlugs: string[]
+  topicSlugs: string[],
+  includeFollowedReposts: boolean,
 ): Promise<Record<string, unknown>[]> {
   const result = await query(
     `WITH candidate_ids AS (
@@ -297,6 +335,14 @@ async function loadArticleCandidates(
         WHERE a.status = 'ready' AND COALESCE(a.published_at, a.created_at) <= $2
           AND g.slug = ANY($3::text[])
         ORDER BY a.published_at DESC NULLS LAST LIMIT 120)
+       UNION
+       (SELECT r.article_id
+        FROM reposts r
+        JOIN follows f ON f.followee_id = r.user_id
+        JOIN articles a ON a.id = r.article_id
+        WHERE $4::boolean AND f.follower_id = $1 AND f.status = 'accepted'
+          AND r.user_id <> $1 AND r.created_at <= $2 AND a.status = 'ready'
+        ORDER BY r.created_at DESC LIMIT 120)
      )
      SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
             a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
@@ -305,6 +351,12 @@ async function loadArticleCandidates(
             a.recommendation_embedding, a.ai_context_allowed,
             v.direction AS my_vote,
             EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+            ${articleSocialFields('a', '$1')},
+            followed_repost.user_id AS reposted_by_user_id,
+            followed_repost.username AS reposted_by_username,
+            followed_repost.avatar_url AS reposted_by_avatar_url,
+            followed_repost.is_demo AS reposted_by_is_demo,
+            followed_repost.created_at AS reposted_at,
             EXISTS(SELECT 1 FROM feed_events fe WHERE fe.user_id = $1 AND fe.item_type = 'article' AND fe.item_id = a.id AND fe.event_type = 'impression' AND fe.created_at > $2 - INTERVAL '7 days') AS recently_seen,
             COALESCE(metrics.impressions, 0)::int AS impressions,
             COALESCE(metrics.opens, 0)::int AS opens,
@@ -312,6 +364,22 @@ async function loadArticleCandidates(
      FROM candidate_ids ids
      JOIN articles a ON a.id = ids.id
      LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
+     LEFT JOIN LATERAL (
+       SELECT r.user_id, reposter.username, reposter.avatar_url, reposter.is_demo, r.created_at
+       FROM reposts r
+       JOIN follows f ON f.followee_id = r.user_id
+         AND f.follower_id = $1 AND f.status = 'accepted'
+       JOIN userdata reposter ON reposter.id = r.user_id
+       WHERE $4::boolean AND r.article_id = a.id AND r.user_id <> $1
+         AND r.created_at <= $2
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks blocked
+           WHERE (blocked.blocker_id = $1 AND blocked.blocked_id = r.user_id)
+              OR (blocked.blocker_id = r.user_id AND blocked.blocked_id = $1)
+         )
+       ORDER BY r.created_at DESC
+       LIMIT 1
+     ) followed_repost ON TRUE
      LEFT JOIN LATERAL (
        SELECT count(*) FILTER (WHERE event_type = 'impression') AS impressions,
               count(*) FILTER (WHERE event_type IN ('open', 'outbound_open')) AS opens,
@@ -324,7 +392,7 @@ async function loadArticleCandidates(
        ON cp.user_id = $1 AND cp.item_type = 'article' AND cp.item_id = a.id
      WHERE cp.item_id IS NULL
      LIMIT 400`,
-    [userId, snapshot, topicSlugs]
+    [userId, snapshot, topicSlugs, includeFollowedReposts]
   )
   return result.rows
 }
@@ -349,16 +417,17 @@ export async function personalizedFeed(input: {
   const snapshot = new Date(cursor.snapshot)
   const { profile, interests, sourceAffinity } = await loadProfile(input.userId, snapshot)
   const topicSlugs = [...new Set(interests.flatMap((interest) => interest.topicSlugs))]
+  const includeFollowedReposts = input.mode === 'for_you'
   const [postRows, articleRows] = await Promise.all([
-    input.content === 'articles' ? Promise.resolve([]) : loadPostCandidates(input.userId, snapshot, topicSlugs),
-    input.content === 'posts' ? Promise.resolve([]) : loadArticleCandidates(input.userId, snapshot, topicSlugs),
+    input.content === 'articles' ? Promise.resolve([]) : loadPostCandidates(input.userId, snapshot, topicSlugs, includeFollowedReposts),
+    input.content === 'posts' ? Promise.resolve([]) : loadArticleCandidates(input.userId, snapshot, topicSlugs, includeFollowedReposts),
   ])
 
   let candidates: RecommendationCandidate[] = [
     ...postRows.map((row): RecommendationCandidate => ({
       kind: 'post',
       id: String(row.id),
-      timestamp: new Date(String(row.created_at)),
+      timestamp: new Date(String(row.reposted_at ?? row.created_at)),
       lean: row.position == null ? null : Number(row.position),
       topicId: row.general_topic_id == null ? null : String(row.general_topic_id),
       sourceKey: String(row.user_id),
@@ -378,7 +447,7 @@ export async function personalizedFeed(input: {
     ...articleRows.map((row): RecommendationCandidate => ({
       kind: 'article',
       id: String(row.id),
-      timestamp: new Date(String(row.published_at ?? row.created_at)),
+      timestamp: new Date(String(row.reposted_at ?? row.published_at ?? row.created_at)),
       lean: row.political_lean == null
         ? row.source_lean == null ? null : Number(row.source_lean)
         : Number(row.political_lean),
@@ -395,7 +464,7 @@ export async function personalizedFeed(input: {
       impressions: Number(row.impressions ?? 0),
       opens: Number(row.opens ?? 0),
       averageDwellMs: Number(row.average_dwell_ms ?? 0),
-      followed: false,
+      followed: row.reposted_by_user_id != null,
       sourceAffinity: sourceAffinity.get(String(row.source ?? '').toLowerCase()) ?? 0,
       recentlySeen: Boolean(row.recently_seen),
       data: projectData(row, ARTICLE_DATA_FIELDS),

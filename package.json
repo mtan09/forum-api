@@ -33,6 +33,7 @@
     "migrate:023": "tsx scripts/apply-023-migration.ts",
     "migrate:024": "tsx scripts/apply-024-migration.ts",
     "migrate:025": "tsx scripts/apply-025-migration.ts",
+    "migrate:026": "tsx scripts/apply-026-migration.ts",
     "verify:release": "tsx scripts/verify-release-migration.ts",
     "storage:feedback": "tsx scripts/ensure-feedback-bucket.ts",
     "verify:feedback-storage": "tsx scripts/verify-feedback-storage.ts",

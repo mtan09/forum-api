@@ -5,6 +5,11 @@ import type { AppEnv } from '../types'
 const mocks = vi.hoisted(() => ({
   connect: vi.fn(),
   query: vi.fn(),
+  moderateText: vi.fn(),
+  moderationFailure: vi.fn(),
+  matchTopic: vi.fn(),
+  scorePost: vi.fn(),
+  semanticEmbedding: vi.fn(),
 }))
 
 vi.mock('../db', () => ({
@@ -18,13 +23,13 @@ vi.mock('../middleware/auth', () => ({
   },
 }))
 vi.mock('../lib/moderation', () => ({
-  moderateText: vi.fn(),
-  moderationFailure: vi.fn(),
+  moderateText: mocks.moderateText,
+  moderationFailure: mocks.moderationFailure,
 }))
 vi.mock('../lib/push', () => ({ notify: vi.fn() }))
-vi.mock('../ingest/topics', () => ({ matchTopic: vi.fn() }))
-vi.mock('../scoring/score', () => ({ scorePost: vi.fn() }))
-vi.mock('../recommendation/semantic', () => ({ semanticEmbedding: vi.fn() }))
+vi.mock('../ingest/topics', () => ({ matchTopic: mocks.matchTopic }))
+vi.mock('../scoring/score', () => ({ scorePost: mocks.scorePost }))
+vi.mock('../recommendation/semantic', () => ({ semanticEmbedding: mocks.semanticEmbedding }))
 
 import posts, { ownedUploadKey } from './posts'
 
@@ -34,6 +39,11 @@ describe('post deletion', () => {
   beforeEach(() => {
     mocks.connect.mockReset()
     mocks.query.mockReset()
+    mocks.moderateText.mockReset()
+    mocks.moderationFailure.mockReset()
+    mocks.matchTopic.mockReset()
+    mocks.scorePost.mockReset()
+    mocks.semanticEmbedding.mockReset()
     process.env.R2_PUBLIC_URL = 'https://media.forum.test/public'
   })
 
@@ -97,5 +107,55 @@ describe('post deletion', () => {
       ['owner/123-photo.jpg'],
     )
     expect(String(client.query.mock.calls.at(-1)?.[0]).trim()).toBe('COMMIT')
+  })
+})
+
+describe('quote post creation', () => {
+  const originalPostId = 'a87f4df3-2a8d-44ee-b327-ad57714c4c66'
+
+  beforeEach(() => {
+    mocks.query.mockReset()
+    mocks.moderateText.mockReset()
+    mocks.moderationFailure.mockReset()
+    mocks.matchTopic.mockReset().mockResolvedValue({ generalTopicId: null })
+    mocks.scorePost.mockReset().mockReturnValue({
+      position: null,
+      confidence: null,
+      signals: [],
+      scorer_version: 'test',
+    })
+    mocks.semanticEmbedding.mockReset().mockReturnValue([0.1, 0.2])
+  })
+
+  it('accepts a quote-only post and grounds local recommendation metadata in the original', async () => {
+    mocks.query
+      .mockResolvedValueOnce({ rows: [{ content: 'Original policy argument' }] })
+      .mockResolvedValueOnce({ rows: [{ id: '987221c2-feef-4021-bf7d-4aa6f0c0e5b1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: '987221c2-feef-4021-bf7d-4aa6f0c0e5b1' }] })
+
+    const response = await app.request('/posts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ quoted_post_id: originalPostId }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(mocks.moderateText).not.toHaveBeenCalled()
+    expect(mocks.matchTopic).toHaveBeenCalledWith('Original policy argument')
+    expect(mocks.semanticEmbedding).toHaveBeenCalledWith('Original policy argument')
+    expect(mocks.query).toHaveBeenCalledWith(
+      expect.stringContaining('quoted_post_id, quoted_article_id'),
+      expect.arrayContaining(['owner', originalPostId, null]),
+    )
+  })
+
+  it('rejects two quote targets before reading or writing content', async () => {
+    const response = await app.request('/posts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ quoted_post_id: originalPostId, quoted_article_id: originalPostId }),
+    })
+    expect(response.status).toBe(400)
+    expect(mocks.query).not.toHaveBeenCalled()
   })
 })

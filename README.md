@@ -108,8 +108,9 @@ then apply only with the exact guarded value documented in
 | `GET`/`PUT /users/me/notification-prefs` | ✅ | Channel/event preferences; accepts the legacy flat push shape during migration |
 | `POST`/`DELETE /users/:id/block` · `GET /users/me/blocks` | ✅ | Block / unblock / list blocked users |
 | `GET /posts?topic_id=&user_id=&feed=following&limit=&offset=` | ✅ | Paginated feed (author + vote joined, blocked/hidden content filtered) |
-| `POST /posts` `{content,media_url?,hashtags?}` | ✅ | Create post (spectrum position computed server-side) |
+| `POST /posts` `{content?,media_url?,hashtags?,quoted_post_id?\|quoted_article_id?}` | ✅ | Create a normal or quote post; new commentary is moderated and its spectrum position is computed server-side |
 | `POST /posts/:id/vote` `{direction: up\|down\|null}` | ✅ | Vote / unvote (counters recomputed transactionally) |
+| `POST /reposts/toggle` `{post_id?\|article_id?}` | ✅ | Repost/unrepost one original item; response count combines direct reposts and visible quote posts |
 | `DELETE /posts/:id` | ✅ | Permanently delete the caller's own post, thread, and queued exact media object |
 | `GET /comments?post_id=\|article_id=\|debate_id=\|parent_comment_id=&page=&limit=` | ✅ | Paginated comments with reply counts |
 | `POST /comments` `{post_id?\|article_id?\|debate_id?\|parent_comment_id?,content}` | ✅ | Comment or reply (on posts, articles, or debates) |
@@ -160,7 +161,7 @@ The current production sender is
 are `https://api.forumeveryside.com/support` and
 `https://api.forumeveryside.com/legal/privacy`; both contact addresses resolve
 to `support@forumeveryside.com`. The production browser client is
-`https://mtan-forum.expo.app`, which is the current `WEB_APP_URL`.
+`https://forumeveryside.com`; the EAS-hosted URL remains a fallback.
 `PUBLIC_API_URL=https://api.forumeveryside.com` ensures verification links use
 the public HTTPS origin even though Railway terminates TLS before Node.
 
@@ -168,7 +169,7 @@ TLS is configured explicitly in `src/db.ts`. Any `sslmode` query parameter is re
 
 ## Going to production
 
-1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts; migration 020 identifies fictional accounts and adds the durable temporary activity queue; migration 021 adds derived article profiles and source-policy eligibility; migration 023 makes structured feedback cascade with account deletion; migration 024 adds typed message attachments and backfills canonical forum links; migration 025 adds retryable exact-object cleanup for individually deleted post media. After the updated API and ingest services are live, run the guarded article-body scrub and verify its database constraint.
+1. Apply numbered migrations before deploying a new mobile binary. Migration 016 retains the seeded test personas while removing John’s admin access; migration 017 adds explicit AI consent evidence and durable Expo push receipts; migration 020 identifies fictional accounts and adds the durable temporary activity queue; migration 021 adds derived article profiles and source-policy eligibility; migration 023 makes structured feedback cascade with account deletion; migration 024 adds typed message attachments and backfills canonical forum links; migration 025 adds retryable exact-object cleanup for individually deleted post media; migration 026 adds direct repost relationships and typed quote references. After the updated API and ingest services are live, run the guarded article-body scrub and verify its database constraint.
 2. Create a public media R2 bucket and a separate private feedback bucket (`npm run storage:feedback`); never enable public access on feedback.
 3. Deploy the API with `/health` as the Railway health check.
 4. Deploy the same repository as a Railway cron service with start command `npm run ingest`, schedule `0 * * * *`, and restart policy `Never`.

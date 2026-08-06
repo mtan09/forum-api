@@ -8,9 +8,11 @@ import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import { scorePost } from '../scoring/score'
 import { semanticEmbedding } from '../recommendation/semantic'
+import { postSocialFields } from '../lib/content-social'
 import type { AppEnv } from '../types'
 
 const posts = new Hono<AppEnv>()
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export function ownedUploadKey(mediaUrl: string | null, userId: string): string | null {
   if (!mediaUrl) return null
@@ -45,7 +47,8 @@ const POST_SELECT = `
          p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
          u.username, u.avatar_url, u.is_demo,
          v.direction AS my_vote,
-         EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark
+         EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
+         ${postSocialFields('p', '$1')}
   FROM posts p
   JOIN userdata u ON u.id = p.user_id
   LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
@@ -115,7 +118,7 @@ posts.get('/', requireAuth, async (c) => {
   return c.json(result.rows)
 })
 
-// POST /posts  { content, media_url?, hashtags?: string[] }
+// POST /posts  { content?, media_url?, hashtags?, quoted_post_id? | quoted_article_id? }
 // Hashtags are author-selected (plus inline #tags in the text). The
 // general topic is derived server-side as background metadata, and the
 // spectrum position is computed by the deterministic scorer — NULL when
@@ -125,9 +128,22 @@ posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_0
   const body = await c.req.json().catch(() => null)
   const content = String(body?.content ?? '').trim()
   const mediaUrl = body?.media_url ? String(body.media_url) : null
+  const quotedPostId = typeof body?.quoted_post_id === 'string' && UUID_RE.test(body.quoted_post_id)
+    ? body.quoted_post_id
+    : null
+  const quotedArticleId = typeof body?.quoted_article_id === 'string' && UUID_RE.test(body.quoted_article_id)
+    ? body.quoted_article_id
+    : null
 
-  if (!content && !mediaUrl) {
-    return c.json({ error: 'Post needs text or an image.' }, 400)
+  if (body?.quoted_post_id && !quotedPostId || body?.quoted_article_id && !quotedArticleId) {
+    return c.json({ error: 'Invalid quoted content.' }, 400)
+  }
+  if (quotedPostId && quotedArticleId) {
+    return c.json({ error: 'A post can quote only one post or article.' }, 400)
+  }
+
+  if (!content && !mediaUrl && !quotedPostId && !quotedArticleId) {
+    return c.json({ error: 'Post needs text, an image, or quoted content.' }, 400)
   }
   if (content) {
     const moderation = await moderateText(c.get('userId'), 'post', content)
@@ -135,19 +151,44 @@ posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_0
     if (failure) return c.json(failure.body, failure.status)
   }
 
+  let quoteGrounding = ''
+  if (quotedPostId) {
+    const quoted = await query(
+      `SELECT p.content
+       FROM posts p
+       WHERE p.id = $2 AND NOT p.hidden
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks b
+           WHERE (b.blocker_id = $1 AND b.blocked_id = p.user_id)
+              OR (b.blocker_id = p.user_id AND b.blocked_id = $1)
+         )`,
+      [c.get('userId'), quotedPostId]
+    )
+    if (!quoted.rows[0]) return c.json({ error: 'The quoted post is unavailable.' }, 404)
+    quoteGrounding = String(quoted.rows[0].content ?? '')
+  } else if (quotedArticleId) {
+    const quoted = await query(
+      `SELECT title FROM articles WHERE id = $1 AND status = 'ready'`,
+      [quotedArticleId]
+    )
+    if (!quoted.rows[0]) return c.json({ error: 'The quoted article is unavailable.' }, 404)
+    quoteGrounding = String(quoted.rows[0].title ?? '')
+  }
+
   const hashtags = normalizeHashtags(body?.hashtags, content)
   const score = scorePost(content)
-  const topic = await matchTopic(`${content} ${hashtags.join(' ')}`)
+  const recommendationText = `${content} ${quoteGrounding} ${hashtags.join(' ')}`.trim()
+  const topic = await matchTopic(recommendationText)
 
   const inserted = await query(
     `INSERT INTO posts (user_id, content, media_url, general_topic_id, hashtags,
                         position, position_confidence, position_signals, scorer_version,
-                        recommendation_embedding)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+                        recommendation_embedding, quoted_post_id, quoted_article_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
     [
       c.get('userId'), content, mediaUrl, topic.generalTopicId, hashtags,
       score.position, score.confidence, score.signals, score.scorer_version,
-      semanticEmbedding(content),
+      semanticEmbedding(recommendationText), quotedPostId, quotedArticleId,
     ]
   )
   const result = await query(`${POST_SELECT} WHERE p.id = $2`, [

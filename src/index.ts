@@ -28,6 +28,7 @@ import legalRoutes from './routes/legal'
 import messagesRoutes from './routes/messages'
 import postsRoutes from './routes/posts'
 import reportsRoutes from './routes/reports'
+import repostsRoutes from './routes/reposts'
 import searchRoutes from './routes/search'
 import shareRoutes from './routes/share'
 import sourcesRoutes from './routes/sources'
@@ -75,6 +76,7 @@ app.route('/messages', messagesRoutes)
 app.route('/legal',    legalRoutes)
 app.route('/',         shareRoutes)
 app.route('/reports',  reportsRoutes)
+app.route('/reposts',  repostsRoutes)
 app.route('/search',   searchRoutes)
 app.route('/sources',  sourcesRoutes)
 app.route('/users',    usersRoutes)

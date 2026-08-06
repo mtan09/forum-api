@@ -3,6 +3,7 @@ import { query } from '../db'
 import { sourcePrior } from '../ingest/sources'
 import { optionalAuth } from '../middleware/auth'
 import type { AppEnv } from '../types'
+import { articleSocialFields } from '../lib/content-social'
 
 const sources = new Hono<AppEnv>()
 
@@ -38,7 +39,8 @@ sources.get('/:name', optionalAuth, async (c) => {
          a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
          a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
          a.ai_context_allowed, v.direction AS my_vote,
-              EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark
+              EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+              ${articleSocialFields('a', '$1')}
        FROM articles a
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
        WHERE a.source = $2 AND a.status = 'ready'

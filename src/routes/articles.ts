@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { optionalAuth, requireAuth } from '../middleware/auth'
+import { articleSocialFields } from '../lib/content-social'
 import type { AppEnv } from '../types'
 
 const articles = new Hono<AppEnv>()
@@ -14,7 +15,8 @@ const ARTICLE_SELECT = `
          a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
          a.ai_context_allowed,
          v.direction AS my_vote,
-         EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark
+         EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+         ${articleSocialFields('a', '$1')}
   FROM articles a
   LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
 `

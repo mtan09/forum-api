@@ -63,13 +63,18 @@ CREATE TABLE IF NOT EXISTS posts (
   scorer_version      TEXT,
   is_demo_generated   BOOLEAN NOT NULL DEFAULT FALSE,
   demo_job_id         UUID,
+  quoted_post_id      UUID,
+  quoted_article_id   UUID,
   upvotes             INTEGER DEFAULT 0,
   downvotes           INTEGER DEFAULT 0,
   commentcount        INTEGER DEFAULT 0,
   hidden              BOOLEAN NOT NULL DEFAULT FALSE,
   search_tsv          TSVECTOR GENERATED ALWAYS AS
                         (to_tsvector('english', coalesce(content, ''))) STORED,
-  created_at          TIMESTAMPTZ DEFAULT NOW()
+  created_at          TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT posts_at_most_one_quote CHECK (
+    num_nonnulls(quoted_post_id, quoted_article_id) <= 1
+  )
 );
 
 CREATE TABLE IF NOT EXISTS articles (
@@ -221,6 +226,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_user_post
   ON bookmarks (user_id, post_id) WHERE post_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS bookmarks_user_article
   ON bookmarks (user_id, article_id) WHERE article_id IS NOT NULL;
+
+-- A direct repost references exactly one original item. Quote posts are
+-- represented by quoted_post_id / quoted_article_id on posts above.
+CREATE TABLE IF NOT EXISTS reposts (
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,
+  article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT reposts_one_target CHECK (num_nonnulls(post_id, article_id) = 1)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS reposts_user_post
+  ON reposts (user_id, post_id) WHERE post_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS reposts_user_article
+  ON reposts (user_id, article_id) WHERE article_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reposts_post_recent
+  ON reposts (post_id, created_at DESC) WHERE post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reposts_article_recent
+  ON reposts (article_id, created_at DESC) WHERE article_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_reposts_user_recent
+  ON reposts (user_id, created_at DESC);
 
 -- Moderation: reports (one live report per reporter per target) and
 -- one-directional blocks (enforced in read queries, not triggers)
@@ -540,6 +565,8 @@ CREATE INDEX IF NOT EXISTS idx_articles_ai_context_recent
 CREATE INDEX IF NOT EXISTS idx_comments_post    ON comments(post_id);
 CREATE INDEX IF NOT EXISTS idx_comments_article ON comments(article_id);
 CREATE INDEX IF NOT EXISTS idx_comments_parent  ON comments(parent_comment_id);
+CREATE INDEX IF NOT EXISTS idx_posts_quoted_post ON posts(quoted_post_id) WHERE quoted_post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_posts_quoted_article ON posts(quoted_article_id) WHERE quoted_article_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_votes_post       ON votes(post_id);
 CREATE INDEX IF NOT EXISTS idx_article_votes_article ON article_votes(article_id);
 CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC);
