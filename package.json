@@ -17,6 +17,7 @@
     "seed:community": "node scripts/seed-community.mjs",
     "seed:expand": "node scripts/seed-expand.mjs",
     "seed:stances": "tsx src/scoring/seed-stance-posts.ts",
+    "seed:comment-showcase": "tsx scripts/seed-comment-showcase.ts",
     "setup:install": "bash scripts/install-clis.sh",
     "setup": "node scripts/setup.mjs",
     "account:release": "tsx scripts/create-release-account.ts",

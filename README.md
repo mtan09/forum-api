@@ -72,7 +72,7 @@ never be written in this repository.
 
 `npm test` runs the vitest suite (scorer determinism and labeled-corpus thresholds, rate limiter, hashtag normalization, publisher-image URL validation, extracted-content quality, and headline-only perspective summaries); CI runs typecheck + tests on every push. A `Dockerfile` is included for Railway/Fly/Render — see `../forum/LAUNCH.md` for the deploy walkthrough.
 
-Seed scripts (all idempotent, run against the live API): `seed:dev` (minimal), `seed:community` (base community), `seed:expand` (larger community + posts, comments, votes, bookmarks, and Floor pins), and `seed:stances` (focused left/right/mixed scoring fixture for an existing mock community). The expansion includes the same substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
+Seed scripts are idempotent: `seed:dev` provides the minimal fixture, `seed:community` and `seed:expand` build out the lived-in community, and `seed:stances` adds focused left/right/mixed scoring cases. `seed:comment-showcase` is a guarded database fixture for visually checking a dense recursive thread on one fictional-demo post; preview it without variables, then apply with `COMMENT_SHOWCASE_APPLY=yes`. Its rows are marked `is_demo_generated`, use stable job IDs, and remain removable with the normal fictional-demo cleanup. The expansion includes substantive policy takes with expected score ranges, so seeding also catches stance-regression errors.
 
 For App Review, migration 020 and `npm run harden:demo` convert the seeded
 `@example.dev` fixtures into locked fictional demo accounts. Migration 021 adds
