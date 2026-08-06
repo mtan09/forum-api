@@ -285,10 +285,19 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
+  shared_post_id UUID REFERENCES posts(id) ON DELETE SET NULL,
+  shared_article_id UUID REFERENCES articles(id) ON DELETE SET NULL,
   hidden BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT messages_one_shared_item CHECK (
+    num_nonnulls(shared_post_id, shared_article_id) <= 1
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_shared_post
+  ON messages (shared_post_id) WHERE shared_post_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_shared_article
+  ON messages (shared_article_id) WHERE shared_article_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS conversation_reads (
   conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -382,6 +391,21 @@ CREATE TABLE IF NOT EXISTS deletion_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_deletion_jobs_due
   ON deletion_jobs (next_attempt_at) WHERE status IN ('pending', 'failed');
+
+CREATE TABLE IF NOT EXISTS media_deletion_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  object_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'processing', 'complete', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_media_deletion_jobs_due
+  ON media_deletion_jobs (next_attempt_at) WHERE status IN ('pending', 'failed');
 
 CREATE TABLE IF NOT EXISTS notification_email_digests (
   user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,

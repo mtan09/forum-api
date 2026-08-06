@@ -1,4 +1,5 @@
 import {
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
@@ -84,4 +85,13 @@ export async function deletePrefix(bucket: string, prefix: string): Promise<numb
     continuationToken = listed.IsTruncated ? listed.NextContinuationToken : undefined
   } while (continuationToken)
   return deleted
+}
+
+export async function deletePublicObject(key: string): Promise<void> {
+  if (!publicStorageConfigured()) {
+    throw new Error(`Public R2 storage is not configured for ${key}`)
+  }
+  await r2Client().send(
+    new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME!, Key: key })
+  )
 }

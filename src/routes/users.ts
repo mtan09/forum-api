@@ -634,6 +634,11 @@ users.get('/:id/followers', requireAuth, async (c) => {
               SELECT 1 FROM follows mine
               WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'
             ) AS followed_by_me,
+            (NOT u.is_private OR EXISTS(
+              SELECT 1 FROM follows allowed
+              WHERE allowed.follower_id = u.id AND allowed.followee_id = $2
+                AND allowed.status = 'accepted'
+            )) AS can_message,
             (SELECT mine.status FROM follows mine WHERE mine.follower_id = $2 AND mine.followee_id = u.id) AS follow_status
      FROM follows f
      JOIN userdata u ON u.id = f.follower_id
@@ -661,6 +666,11 @@ users.get('/:id/following', requireAuth, async (c) => {
               SELECT 1 FROM follows mine
               WHERE mine.follower_id = $2 AND mine.followee_id = u.id AND mine.status = 'accepted'
             ) AS followed_by_me,
+            (NOT u.is_private OR EXISTS(
+              SELECT 1 FROM follows allowed
+              WHERE allowed.follower_id = u.id AND allowed.followee_id = $2
+                AND allowed.status = 'accepted'
+            )) AS can_message,
             (SELECT mine.status FROM follows mine WHERE mine.follower_id = $2 AND mine.followee_id = u.id) AS follow_status
      FROM follows f
      JOIN userdata u ON u.id = f.followee_id
@@ -686,6 +696,10 @@ users.get('/:id', requireAuth, async (c) => {
               WHERE f.follower_id = $2 AND f.followee_id = id AND f.status = 'accepted'
             ) AS followed_by_me,
             (SELECT f.status FROM follows f WHERE f.follower_id = $2 AND f.followee_id = id) AS follow_status,
+            (NOT is_private OR EXISTS(
+              SELECT 1 FROM follows f
+              WHERE f.follower_id = id AND f.followee_id = $2 AND f.status = 'accepted'
+            )) AS can_message,
             (id = $2 OR NOT is_private OR EXISTS(
               SELECT 1 FROM follows f
               WHERE f.follower_id = $2 AND f.followee_id = id AND f.status = 'accepted'

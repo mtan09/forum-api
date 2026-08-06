@@ -101,6 +101,79 @@ comments.post('/:id/vote', requireAuth, async (c) => {
   }
 })
 
+// DELETE /comments/:id — authors may delete their own comment. Descendant
+// replies are removed with it and cached parent content counts are reduced by
+// the exact size of that subtree.
+comments.delete('/:id', requireAuth, async (c) => {
+  const commentId = c.req.param('id')
+  const userId = c.get('userId')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query(
+      `SELECT user_id, post_id, article_id, debate_id, parent_comment_id
+       FROM comments WHERE id = $1 FOR UPDATE`,
+      [commentId]
+    )
+    const comment = existing.rows[0]
+    if (!comment) {
+      await client.query('ROLLBACK')
+      return c.json({ error: 'Comment not found.' }, 404)
+    }
+    if (comment.user_id !== userId) {
+      await client.query('ROLLBACK')
+      return c.json({ error: 'You can only delete your own comments.' }, 403)
+    }
+
+    const subtree = await client.query(
+      `WITH RECURSIVE removed AS (
+         SELECT id FROM comments WHERE id = $1
+         UNION ALL
+         SELECT child.id
+         FROM comments child
+         JOIN removed parent ON child.parent_comment_id = parent.id
+       )
+       SELECT array_agg(id::text) AS ids, count(*)::int AS count FROM removed`,
+      [commentId]
+    )
+    const removedIds: string[] = subtree.rows[0]?.ids ?? [commentId]
+    const removedCount = Number(subtree.rows[0]?.count ?? 1)
+    await client.query(
+      `DELETE FROM reports
+       WHERE target_kind = 'comment' AND target_id = ANY($1::text[])`,
+      [removedIds]
+    )
+    await client.query('DELETE FROM comments WHERE id = $1', [commentId])
+    if (comment.post_id) {
+      await client.query(
+        'UPDATE posts SET commentcount = GREATEST(0, commentcount - $2) WHERE id = $1',
+        [comment.post_id, removedCount]
+      )
+    }
+    if (comment.article_id) {
+      await client.query(
+        'UPDATE articles SET commentcount = GREATEST(0, commentcount - $2) WHERE id = $1',
+        [comment.article_id, removedCount]
+      )
+    }
+    await client.query('COMMIT')
+    return c.json({
+      deleted: true,
+      id: commentId,
+      removed_comment_count: removedCount,
+      post_id: comment.post_id,
+      article_id: comment.article_id,
+      debate_id: comment.debate_id,
+      parent_comment_id: comment.parent_comment_id,
+    })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+})
+
 // POST /comments  { post_id? | article_id? | debate_id? | parent_comment_id?, content }
 comments.post('/', requireAuth, rateLimit({ name: 'createComment', windowMs: 60 * 60_000, max: 120 }), async (c) => {
   const body = await c.req.json().catch(() => null)

@@ -12,6 +12,33 @@ import type { AppEnv } from '../types'
 
 const posts = new Hono<AppEnv>()
 
+export function ownedUploadKey(mediaUrl: string | null, userId: string): string | null {
+  if (!mediaUrl) return null
+  try {
+    const parsed = new URL(mediaUrl)
+    let filename: string | undefined
+    const publicBase = process.env.R2_PUBLIC_URL?.replace(/\/$/, '')
+    if (publicBase) {
+      const base = new URL(publicBase)
+      const basePath = base.pathname.replace(/\/$/, '')
+      const expectedPrefix = `${basePath}/${userId}/`.replace(/\/+/g, '/')
+      if (parsed.origin === base.origin && parsed.pathname.startsWith(expectedPrefix)) {
+        filename = decodeURIComponent(parsed.pathname.slice(expectedPrefix.length))
+      }
+    }
+    if (!filename) {
+      const localPrefix = `/storage/files/${userId}/`
+      if (parsed.pathname.startsWith(localPrefix)) {
+        filename = decodeURIComponent(parsed.pathname.slice(localPrefix.length))
+      }
+    }
+    if (!filename || !/^[\w-]+\.(?:jpe?g|png|webp|gif|heic|heif)$/i.test(filename)) return null
+    return `${userId}/${filename}`
+  } catch {
+    return null
+  }
+}
+
 const POST_SELECT = `
   SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
          p.position_confidence, p.position_signals, p.scorer_version,
@@ -194,6 +221,67 @@ posts.post('/:id/vote', requireAuth, async (c) => {
       }
     }
     return c.json({ ...updated.rows[0], my_vote: direction })
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+})
+
+// DELETE /posts/:id — authors may permanently delete their own posts.
+// Related comments, votes, bookmarks, digests, and demo jobs cascade through
+// foreign keys. Reports and message tombstones are handled explicitly because
+// their target ids are intentionally stored as text/nullable references.
+posts.delete('/:id', requireAuth, async (c) => {
+  const postId = c.req.param('id')
+  const userId = c.get('userId')
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query(
+      'SELECT user_id, media_url FROM posts WHERE id = $1 FOR UPDATE',
+      [postId]
+    )
+    const post = existing.rows[0]
+    if (!post) {
+      await client.query('ROLLBACK')
+      return c.json({ error: 'Post not found.' }, 404)
+    }
+    if (post.user_id !== userId) {
+      await client.query('ROLLBACK')
+      return c.json({ error: 'You can only delete your own posts.' }, 403)
+    }
+
+    await client.query(
+      `UPDATE messages
+       SET content = 'This shared post is no longer available.'
+       WHERE shared_post_id = $1`,
+      [postId]
+    )
+    await client.query(
+      `DELETE FROM reports
+       WHERE (target_kind = 'post' AND target_id = $1::text)
+          OR (target_kind = 'comment' AND target_id IN (
+            SELECT id::text FROM comments WHERE post_id = $1::uuid
+          ))`,
+      [postId]
+    )
+
+    const objectKey = ownedUploadKey(post.media_url ?? null, userId)
+    if (objectKey) {
+      await client.query(
+        `INSERT INTO media_deletion_jobs (object_key)
+         VALUES ($1)
+         ON CONFLICT (object_key) DO UPDATE SET
+           status = 'pending', next_attempt_at = NOW(), updated_at = NOW(), last_error = NULL`,
+        [objectKey]
+      )
+    }
+
+    await client.query('DELETE FROM posts WHERE id = $1', [postId])
+    await client.query('COMMIT')
+    return c.json({ deleted: true, id: postId })
   } catch (err) {
     await client.query('ROLLBACK')
     throw err

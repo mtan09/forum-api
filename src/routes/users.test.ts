@@ -94,6 +94,17 @@ describe('private follows and notification preferences', () => {
     expect(response.status).toBe(404)
   })
 
+  it('returns messaging eligibility based on whether a private profile follows the viewer', async () => {
+    mocks.query.mockResolvedValueOnce({
+      rows: [{ id: 'target', is_private: true, can_message: false }],
+    })
+    const response = await app.request('/users/target')
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ can_message: false })
+    expect(mocks.query.mock.calls[0][0]).toContain('f.follower_id = id')
+    expect(mocks.query.mock.calls[0][0]).toContain('f.followee_id = $2')
+  })
+
   it('requires verified email before global email delivery is enabled', async () => {
     mocks.query.mockResolvedValueOnce({ rows: [{ email_verified: false }] })
     const response = await app.request('/users/me/notification-prefs', {

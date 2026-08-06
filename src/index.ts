@@ -8,6 +8,7 @@ import pool from './db'
 import { redactRequestLog } from './lib/request-log'
 import { captureException, initSentry } from './lib/sentry'
 import { processDeletionJobs } from './jobs/deletion'
+import { processMediaDeletionJobs } from './jobs/contentMediaDeletion'
 import { flushEmailDigests, processPushReceipts } from './lib/push'
 
 initSentry()
@@ -91,7 +92,12 @@ serve({ fetch: app.fetch, port }, () => {
 // account-media cleanup.
 // News ingestion intentionally does not run here; Railway owns that schedule.
 const runBackgroundJobs = () =>
-  Promise.all([processDeletionJobs(), flushEmailDigests(), processPushReceipts()]).catch((err) => {
+  Promise.all([
+    processDeletionJobs(),
+    processMediaDeletionJobs(),
+    flushEmailDigests(),
+    processPushReceipts(),
+  ]).catch((err) => {
     console.error('[jobs] background run failed:', err)
     captureException(err, { component: 'background-jobs' })
   })

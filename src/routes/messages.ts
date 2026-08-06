@@ -7,22 +7,59 @@ import { rateLimit } from '../middleware/rateLimit'
 import type { AppEnv } from '../types'
 
 const messages = new Hono<AppEnv>()
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+type SharedKind = 'post' | 'article'
+
+async function sharedPreview(kind: SharedKind, id: string, senderId: string, recipientId: string) {
+  if (kind === 'post') {
+    const result = await query(
+      `SELECT jsonb_build_object(
+                'kind', 'post',
+                'id', p.id,
+                'text', p.content,
+                'media_url', p.media_url,
+                'position', p.position,
+                'author_id', p.user_id,
+                'author_name', u.username,
+                'author_avatar_url', u.avatar_url,
+                'author_is_demo', u.is_demo
+              ) AS shared
+       FROM posts p
+       JOIN userdata u ON u.id = p.user_id
+       WHERE p.id = $1 AND NOT p.hidden
+         AND NOT EXISTS(
+           SELECT 1 FROM blocks bl
+           WHERE (bl.blocker_id IN ($2, $3) AND bl.blocked_id = p.user_id)
+              OR (bl.blocker_id = p.user_id AND bl.blocked_id IN ($2, $3))
+         )`,
+      [id, senderId, recipientId]
+    )
+    return result.rows[0]?.shared ?? null
+  }
+
+  const result = await query(
+    `SELECT jsonb_build_object(
+              'kind', 'article',
+              'id', a.id,
+              'title', a.title,
+              'source', a.source,
+              'media_url', a.media,
+              'political_lean', a.political_lean,
+              'source_lean', a.source_lean,
+              'published_at', a.published_at
+            ) AS shared
+     FROM articles a
+     WHERE a.id = $1 AND a.status = 'ready'`,
+    [id]
+  )
+  return result.rows[0]?.shared ?? null
+}
 
 // Conversations are keyed by the sorted user pair, so "the conversation
 // with user X" is always unique regardless of who messaged first. Client
 // screens address threads by the OTHER user's id, never by conversation id.
 const sortPair = (x: string, y: string): [string, string] => (x < y ? [x, y] : [y, x])
-
-// Blocks kill DMs in both directions
-async function blockedEitherWay(me: string, other: string): Promise<boolean> {
-  const result = await query(
-    `SELECT 1 FROM blocks
-     WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
-     LIMIT 1`,
-    [me, other]
-  )
-  return !!result.rows[0]
-}
 
 // GET /messages — the inbox: every conversation, newest activity first,
 // with the other participant, last message preview, and unread count.
@@ -31,8 +68,18 @@ messages.get('/', requireAuth, async (c) => {
   const result = await query(
     `SELECT conv.id AS conversation_id,
             other.id AS user_id, other.username, other.avatar_url, other.is_demo,
+            (NOT other.is_private OR EXISTS(
+              SELECT 1 FROM follows f
+              WHERE f.follower_id = other.id AND f.followee_id = $1 AND f.status = 'accepted'
+            )) AS can_message,
             conv.last_message_at,
-            lm.content AS last_message,
+            CASE WHEN lm.shared_post_id IS NOT NULL THEN 'Shared a post'
+                 WHEN lm.shared_article_id IS NOT NULL THEN 'Shared an article'
+                 ELSE NULLIF(lm.content, '')
+            END AS last_message,
+            CASE WHEN lm.shared_post_id IS NOT NULL THEN 'post'
+                 WHEN lm.shared_article_id IS NOT NULL THEN 'article'
+            END AS last_message_kind,
             lm.sender_id AS last_sender_id,
             (SELECT count(*)::int FROM messages m
              WHERE m.conversation_id = conv.id
@@ -43,7 +90,7 @@ messages.get('/', requireAuth, async (c) => {
      JOIN userdata other ON other.id = CASE WHEN conv.a_id = $1 THEN conv.b_id ELSE conv.a_id END
      LEFT JOIN conversation_reads r ON r.conversation_id = conv.id AND r.user_id = $1
      LEFT JOIN LATERAL (
-       SELECT content, sender_id FROM messages m
+       SELECT content, sender_id, shared_post_id, shared_article_id FROM messages m
        WHERE m.conversation_id = conv.id AND m.hidden = FALSE
        ORDER BY m.created_at DESC LIMIT 1
      ) lm ON TRUE
@@ -88,10 +135,46 @@ messages.get('/with/:userId', requireAuth, async (c) => {
   if (!conversationId) return c.json({ conversation_id: null, messages: [] })
 
   const rows = await query(
-    `SELECT id, sender_id, content, created_at
-     FROM messages WHERE conversation_id = $1 AND hidden = FALSE
-     ORDER BY created_at DESC LIMIT $2`,
-    [conversationId, limit]
+    `SELECT m.id, m.sender_id, m.content, m.created_at,
+            CASE WHEN m.shared_post_id IS NOT NULL THEN 'post'
+                 WHEN m.shared_article_id IS NOT NULL THEN 'article'
+            END AS shared_kind,
+            COALESCE(m.shared_post_id, m.shared_article_id) AS shared_id,
+            CASE
+              WHEN sp.id IS NOT NULL THEN jsonb_build_object(
+                'kind', 'post',
+                'id', sp.id,
+                'text', sp.content,
+                'media_url', sp.media_url,
+                'position', sp.position,
+                'author_id', sp.user_id,
+                'author_name', spu.username,
+                'author_avatar_url', spu.avatar_url,
+                'author_is_demo', spu.is_demo
+              )
+              WHEN sa.id IS NOT NULL THEN jsonb_build_object(
+                'kind', 'article',
+                'id', sa.id,
+                'title', sa.title,
+                'source', sa.source,
+                'media_url', sa.media,
+                'political_lean', sa.political_lean,
+                'source_lean', sa.source_lean,
+                'published_at', sa.published_at
+              )
+            END AS shared
+     FROM messages m
+     LEFT JOIN posts sp ON sp.id = m.shared_post_id AND NOT sp.hidden
+       AND NOT EXISTS(
+         SELECT 1 FROM blocks bl
+         WHERE (bl.blocker_id = $3 AND bl.blocked_id = sp.user_id)
+            OR (bl.blocker_id = sp.user_id AND bl.blocked_id = $3)
+       )
+     LEFT JOIN userdata spu ON spu.id = sp.user_id
+     LEFT JOIN articles sa ON sa.id = m.shared_article_id AND sa.status = 'ready'
+     WHERE m.conversation_id = $1 AND m.hidden = FALSE
+     ORDER BY m.created_at DESC LIMIT $2`,
+    [conversationId, limit, me]
   )
   await query(
     `INSERT INTO conversation_reads (conversation_id, user_id, last_read_at)
@@ -102,7 +185,7 @@ messages.get('/with/:userId', requireAuth, async (c) => {
   return c.json({ conversation_id: conversationId, messages: rows.rows.reverse() })
 })
 
-// POST /messages/with/:userId  { content } — find-or-create the
+// POST /messages/with/:userId  { content?, shared_kind?, shared_id? } — find-or-create the
 // conversation, append the message.
 messages.post(
   '/with/:userId',
@@ -115,16 +198,59 @@ messages.post(
 
     const body = await c.req.json().catch(() => null)
     const content = String(body?.content ?? '').trim()
-    if (!content) return c.json({ error: 'Message is empty.' }, 400)
+    const requestedKind = body?.shared_kind == null ? null : String(body.shared_kind)
+    const requestedId = body?.shared_id == null ? null : String(body.shared_id)
+    if ((requestedKind == null) !== (requestedId == null)) {
+      return c.json({ error: 'A shared item needs both its kind and id.' }, 400)
+    }
+    if (requestedKind !== null && requestedKind !== 'post' && requestedKind !== 'article') {
+      return c.json({ error: 'Shared item kind must be post or article.' }, 400)
+    }
+    if (requestedId !== null && !UUID_PATTERN.test(requestedId)) {
+      return c.json({ error: 'Shared item id is invalid.' }, 400)
+    }
+    if (!content && !requestedKind) return c.json({ error: 'Message is empty.' }, 400)
     if (content.length > 2000) return c.json({ error: 'Message is too long (2000 max).' }, 400)
-    const moderation = await moderateText(me, 'dm', content)
-    const moderationError = moderationFailure(moderation)
-    if (moderationError) return c.json(moderationError.body, moderationError.status)
-
-    const exists = await query('SELECT 1 FROM userdata WHERE id = $1', [other])
-    if (!exists.rows[0]) return c.json({ error: 'User not found' }, 404)
-    if (await blockedEitherWay(me, other)) {
+    const access = await query(
+      `SELECT u.is_private,
+              EXISTS(
+                SELECT 1 FROM follows f
+                WHERE f.follower_id = u.id AND f.followee_id = $1 AND f.status = 'accepted'
+              ) AS follows_sender,
+              EXISTS(
+                SELECT 1 FROM blocks b
+                WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+                   OR (b.blocker_id = u.id AND b.blocked_id = $1)
+              ) AS blocked
+       FROM userdata u WHERE u.id = $2`,
+      [me, other]
+    )
+    const recipient = access.rows[0]
+    if (!recipient) return c.json({ error: 'User not found' }, 404)
+    if (recipient.blocked) {
       return c.json({ error: 'You can’t message this account.' }, 403)
+    }
+    if (recipient.is_private && !recipient.follows_sender) {
+      return c.json(
+        {
+          code: 'PRIVATE_DM_RESTRICTED',
+          error: 'This private account must follow you before you can message them.',
+        },
+        403
+      )
+    }
+
+    const shared = requestedKind && requestedId
+      ? await sharedPreview(requestedKind as SharedKind, requestedId, me, other)
+      : null
+    if (requestedKind && !shared) {
+      return c.json({ error: `Shared ${requestedKind} not found.` }, 404)
+    }
+
+    if (content) {
+      const moderation = await moderateText(me, 'dm', content)
+      const moderationError = moderationFailure(moderation)
+      if (moderationError) return c.json(moderationError.body, moderationError.status)
     }
 
     const [a, b] = sortPair(me, other)
@@ -139,9 +265,18 @@ messages.post(
       )
       const conversationId = conv.rows[0].id
       const inserted = await client.query(
-        `INSERT INTO messages (conversation_id, sender_id, content)
-         VALUES ($1, $2, $3) RETURNING id, sender_id, content, created_at`,
-        [conversationId, me, content]
+        `INSERT INTO messages (
+           conversation_id, sender_id, content, shared_post_id, shared_article_id
+         )
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, sender_id, content, created_at`,
+        [
+          conversationId,
+          me,
+          content,
+          requestedKind === 'post' ? requestedId : null,
+          requestedKind === 'article' ? requestedId : null,
+        ]
       )
       await client.query('UPDATE conversations SET last_message_at = NOW() WHERE id = $1', [
         conversationId,
@@ -158,10 +293,20 @@ messages.post(
       const sender = await query('SELECT username FROM userdata WHERE id = $1', [me])
       notify(other, 'dms', {
         title: sender.rows[0]?.username ?? 'New message',
-        body: content.length > 120 ? `${content.slice(0, 117)}...` : content,
+        body: content
+          ? content.length > 120 ? `${content.slice(0, 117)}...` : content
+          : requestedKind === 'post' ? 'Shared a post' : 'Shared an article',
         data: { url: `/dm/${me}` },
       })
-      return c.json({ conversation_id: conversationId, message: inserted.rows[0] }, 201)
+      return c.json({
+        conversation_id: conversationId,
+        message: {
+          ...inserted.rows[0],
+          shared_kind: requestedKind,
+          shared_id: requestedId,
+          shared,
+        },
+      }, 201)
     } catch (err) {
       await client.query('ROLLBACK')
       throw err
