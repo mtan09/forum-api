@@ -10,6 +10,7 @@ import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
 import type { AppEnv } from '../types'
 import { articleSocialFields, postSocialFields } from '../lib/content-social'
+import { mergePage, parsePagination } from '../lib/pagination'
 
 const users = new Hono<AppEnv>()
 
@@ -444,6 +445,7 @@ users.get('/me/blocks', requireAuth, async (c) => {
 // GET /users/me/posts — the caller's own posts, newest first
 users.get('/me/posts', requireAuth, async (c) => {
   const userId = c.get('userId')
+  const { limit, offset } = parsePagination(c.req.query('limit'), c.req.query('offset'))
   const result = await query(
     `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
             p.position_confidence, p.position_signals, p.scorer_version,
@@ -457,8 +459,8 @@ users.get('/me/posts', requireAuth, async (c) => {
      LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
      WHERE p.user_id = $1 AND NOT p.hidden
      ORDER BY p.created_at DESC
-     LIMIT 100`,
-    [userId]
+     LIMIT $2 OFFSET $3`,
+    [userId, limit, offset]
   )
   return c.json(result.rows)
 })
@@ -466,6 +468,7 @@ users.get('/me/posts', requireAuth, async (c) => {
 // GET /users/me/comments — the caller's comments with enough parent
 // context (title + kind) for the profile list to link back to the thread
 users.get('/me/comments', requireAuth, async (c) => {
+  const { limit, offset } = parsePagination(c.req.query('limit'), c.req.query('offset'))
   const result = await query(
     `SELECT c.id, c.content, c.created_at, c.upvotes, c.downvotes,
             c.post_id, c.article_id, c.parent_comment_id,
@@ -476,8 +479,8 @@ users.get('/me/comments', requireAuth, async (c) => {
      LEFT JOIN articles a ON a.id = c.article_id
      WHERE c.user_id = $1
      ORDER BY c.created_at DESC
-     LIMIT 100`,
-    [c.get('userId')]
+     LIMIT $2 OFFSET $3`,
+    [c.get('userId'), limit, offset]
   )
   return c.json(result.rows)
 })
@@ -486,6 +489,8 @@ users.get('/me/comments', requireAuth, async (c) => {
 // vote first, in the same mixed shape as GET /bookmarks
 users.get('/me/upvoted', requireAuth, async (c) => {
   const userId = c.get('userId')
+  const { limit, offset } = parsePagination(c.req.query('limit'), c.req.query('offset'))
+  const reach = limit + offset
   const [posts, articles] = await Promise.all([
     query(
       `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
@@ -499,8 +504,10 @@ users.get('/me/upvoted', requireAuth, async (c) => {
        FROM votes v
        JOIN posts p ON p.id = v.post_id
        JOIN userdata u ON u.id = p.user_id
-       WHERE v.user_id = $1 AND v.direction = 'up' AND NOT p.hidden`,
-      [userId]
+       WHERE v.user_id = $1 AND v.direction = 'up' AND NOT p.hidden
+       ORDER BY v.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
     ),
     query(
       `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
@@ -513,15 +520,80 @@ users.get('/me/upvoted', requireAuth, async (c) => {
               v.created_at AS voted_at
        FROM article_votes v
        JOIN articles a ON a.id = v.article_id
-       WHERE v.user_id = $1 AND v.direction = 'up' AND a.status = 'ready'`,
-      [userId]
+       WHERE v.user_id = $1 AND v.direction = 'up' AND a.status = 'ready'
+       ORDER BY v.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
     ),
   ])
 
-  const items = [
-    ...posts.rows.map((row) => ({ kind: 'post' as const, voted_at: row.voted_at, item: row })),
-    ...articles.rows.map((row) => ({ kind: 'article' as const, voted_at: row.voted_at, item: row })),
-  ].sort((x, y) => new Date(y.voted_at).getTime() - new Date(x.voted_at).getTime())
+  const items = mergePage(
+    [
+      ...posts.rows.map((row) => ({ kind: 'post' as const, voted_at: row.voted_at, item: row })),
+      ...articles.rows.map((row) => ({ kind: 'article' as const, voted_at: row.voted_at, item: row })),
+    ],
+    (row) => row.voted_at,
+    limit,
+    offset
+  )
+
+  return c.json(items)
+})
+
+// GET /users/me/reposts — posts and articles the caller reposted, newest
+// repost first, in the same mixed shape as GET /bookmarks
+users.get('/me/reposts', requireAuth, async (c) => {
+  const userId = c.get('userId')
+  const { limit, offset } = parsePagination(c.req.query('limit'), c.req.query('offset'))
+  const reach = limit + offset
+  const [posts, articles] = await Promise.all([
+    query(
+      `SELECT p.id, p.user_id, p.content, p.media_url, p.general_topic_id, p.position,
+              p.position_confidence, p.position_signals, p.scorer_version,
+              p.hashtags, p.upvotes, p.downvotes, p.commentcount, p.created_at,
+              u.username, u.avatar_url, u.is_demo,
+              v.direction AS my_vote,
+              EXISTS(SELECT 1 FROM bookmarks b WHERE b.post_id = p.id AND b.user_id = $1) AS my_bookmark,
+              ${postSocialFields('p', '$1')},
+              r.created_at AS reposted_at
+       FROM reposts r
+       JOIN posts p ON p.id = r.post_id
+       JOIN userdata u ON u.id = p.user_id
+       LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
+       WHERE r.user_id = $1 AND NOT p.hidden
+         AND NOT EXISTS(SELECT 1 FROM blocks bl WHERE bl.blocker_id = $1 AND bl.blocked_id = p.user_id)
+       ORDER BY r.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
+    ),
+    query(
+      `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
+         a.political_relevance, a.lean_confidence, a.content_type, a.lean_signals,
+         a.source_lean, a.scorer_version, a.upvotes, a.downvotes, a.commentcount,
+         a.general_topic_id, a.subtopic_id, a.published_at, a.status, a.created_at,
+         a.ai_context_allowed, v.direction AS my_vote,
+              EXISTS(SELECT 1 FROM bookmarks b WHERE b.article_id = a.id AND b.user_id = $1) AS my_bookmark,
+              ${articleSocialFields('a', '$1')},
+              r.created_at AS reposted_at
+       FROM reposts r
+       JOIN articles a ON a.id = r.article_id
+       LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
+       WHERE r.user_id = $1 AND a.status = 'ready'
+       ORDER BY r.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
+    ),
+  ])
+
+  const items = mergePage(
+    [
+      ...posts.rows.map((row) => ({ kind: 'post' as const, reposted_at: row.reposted_at, item: row })),
+      ...articles.rows.map((row) => ({ kind: 'article' as const, reposted_at: row.reposted_at, item: row })),
+    ],
+    (row) => row.reposted_at,
+    limit,
+    offset
+  )
 
   return c.json(items)
 })

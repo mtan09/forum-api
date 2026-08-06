@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { query } from '../db'
 import { requireAuth } from '../middleware/auth'
 import { articleSocialFields, postSocialFields } from '../lib/content-social'
+import { mergePage, parsePagination } from '../lib/pagination'
 import type { AppEnv } from '../types'
 
 const bookmarks = new Hono<AppEnv>()
@@ -44,6 +45,8 @@ bookmarks.post('/toggle', requireAuth, async (c) => {
 // first, each item in the same shape its feed endpoint returns.
 bookmarks.get('/', requireAuth, async (c) => {
   const userId = c.get('userId')
+  const { limit, offset } = parsePagination(c.req.query('limit'), c.req.query('offset'))
+  const reach = limit + offset
 
   const [posts, articles] = await Promise.all([
     query(
@@ -59,8 +62,10 @@ bookmarks.get('/', requireAuth, async (c) => {
        JOIN posts p ON p.id = b.post_id
        JOIN userdata u ON u.id = p.user_id
        LEFT JOIN votes v ON v.post_id = p.id AND v.user_id = $1
-       WHERE b.user_id = $1 AND NOT p.hidden`,
-      [userId]
+       WHERE b.user_id = $1 AND NOT p.hidden
+       ORDER BY b.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
     ),
     query(
       `SELECT a.id, a.url, a.title, a.source, a.media, a.political_lean,
@@ -72,15 +77,22 @@ bookmarks.get('/', requireAuth, async (c) => {
        FROM bookmarks b
        JOIN articles a ON a.id = b.article_id
        LEFT JOIN article_votes v ON v.article_id = a.id AND v.user_id = $1
-       WHERE b.user_id = $1 AND a.status = 'ready'`,
-      [userId]
+       WHERE b.user_id = $1 AND a.status = 'ready'
+       ORDER BY b.created_at DESC
+       LIMIT $2`,
+      [userId, reach]
     ),
   ])
 
-  const items = [
-    ...posts.rows.map((row) => ({ kind: 'post' as const, saved_at: row.saved_at, item: row })),
-    ...articles.rows.map((row) => ({ kind: 'article' as const, saved_at: row.saved_at, item: row })),
-  ].sort((x, y) => new Date(y.saved_at).getTime() - new Date(x.saved_at).getTime())
+  const items = mergePage(
+    [
+      ...posts.rows.map((row) => ({ kind: 'post' as const, saved_at: row.saved_at, item: row })),
+      ...articles.rows.map((row) => ({ kind: 'article' as const, saved_at: row.saved_at, item: row })),
+    ],
+    (row) => row.saved_at,
+    limit,
+    offset
+  )
 
   return c.json(items)
 })
