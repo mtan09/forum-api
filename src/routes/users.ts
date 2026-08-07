@@ -472,6 +472,7 @@ users.get('/me/comments', requireAuth, async (c) => {
   const result = await query(
     `SELECT c.id, c.content, c.created_at, c.upvotes, c.downvotes,
             c.post_id, c.article_id, c.parent_comment_id,
+            (SELECT count(*)::int FROM comments r WHERE r.parent_comment_id = c.id) AS reply_count,
             CASE WHEN c.article_id IS NOT NULL THEN 'article' ELSE 'post' END AS parent_kind,
             COALESCE(a.title, LEFT(p.content, 80)) AS parent_title
      FROM comments c
