@@ -10,6 +10,14 @@ import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
 import type { AppEnv } from '../types'
 import { articleSocialFields, postSocialFields } from '../lib/content-social'
+import {
+  POST_WEIGHT,
+  VOTE_WEIGHT,
+  decayedWeight,
+  spectrumPosition,
+  voteValue,
+  type SpectrumEvent,
+} from '../lib/spectrum'
 import { mergePage, parsePagination } from '../lib/pagination'
 
 const users = new Hono<AppEnv>()
@@ -103,59 +111,49 @@ users.patch('/me', requireAuth, async (c) => {
   }
 })
 
-// GET /users/me/spectrum — the user's single political placement, computed
-// from their actual activity (never self-declared):
-//   - each of their scored posts contributes its position at weight 3
-//   - each upvote contributes the voted content's lean at weight 1
-//   - each downvote contributes the MIRROR of the content's lean (1 - lean)
-//     at weight 1 — disagreeing with a right-leaning item is a left signal
-// Votes on their own posts are excluded; unscored content contributes
-// nothing. position = Σ(weight·value) / Σweight, 0.5 with no activity.
-const POST_WEIGHT = 3
-const VOTE_WEIGHT = 1
-
+// GET /users/me/spectrum — the user's single political placement. See
+// lib/spectrum.ts for the model and for why the decay is floorless.
 async function computeSpectrum(userId: string) {
   const [ownPosts, postVotes, articleVotes] = await Promise.all([
-    query('SELECT position FROM posts WHERE user_id = $1 AND position IS NOT NULL', [userId]),
     query(
-      `SELECT v.direction, p.position AS lean
+      'SELECT position, created_at FROM posts WHERE user_id = $1 AND position IS NOT NULL',
+      [userId]
+    ),
+    query(
+      `SELECT v.direction, p.position AS lean, v.created_at
        FROM votes v JOIN posts p ON p.id = v.post_id
        WHERE v.user_id = $1 AND p.user_id <> $1 AND p.position IS NOT NULL`,
       [userId]
     ),
     query(
-      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean
+      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean, v.created_at
        FROM article_votes v JOIN articles a ON a.id = v.article_id
        WHERE v.user_id = $1 AND COALESCE(a.political_lean, a.source_lean) IS NOT NULL`,
       [userId]
     ),
   ])
 
-  let weightedSum = 0
-  let totalWeight = 0
-  let upvotes = 0
-  let downvotes = 0
+  const voteRows = [...postVotes.rows, ...articleVotes.rows]
+  const events: SpectrumEvent[] = [
+    ...ownPosts.rows.map((row) => ({
+      at: new Date(row.created_at),
+      weight: POST_WEIGHT,
+      value: Number(row.position),
+    })),
+    ...voteRows.map((row) => ({
+      at: new Date(row.created_at),
+      weight: VOTE_WEIGHT,
+      value: voteValue(String(row.direction), Number(row.lean)),
+    })),
+  ]
 
-  for (const row of ownPosts.rows) {
-    weightedSum += POST_WEIGHT * Number(row.position)
-    totalWeight += POST_WEIGHT
-  }
-  for (const row of [...postVotes.rows, ...articleVotes.rows]) {
-    const lean = Number(row.lean)
-    if (row.direction === 'up') {
-      weightedSum += VOTE_WEIGHT * lean
-      upvotes++
-    } else {
-      weightedSum += VOTE_WEIGHT * (1 - lean)
-      downvotes++
-    }
-    totalWeight += VOTE_WEIGHT
-  }
-
-  const position = totalWeight > 0 ? Number((weightedSum / totalWeight).toFixed(3)) : 0.5
   return {
-    position,
-    sample: { posts: ownPosts.rows.length, upvotes, downvotes },
+    position: Number(spectrumPosition(events, new Date()).toFixed(3)),
+    sample: {
+      posts: ownPosts.rows.length,
+      upvotes: voteRows.filter((row) => row.direction === 'up').length,
+      downvotes: voteRows.filter((row) => row.direction !== 'up').length,
+    },
   }
 }
 
@@ -188,17 +186,23 @@ users.get('/me/spectrum/history', requireAuth, async (c) => {
     ),
   ])
 
+  // Weights are decayed against one fixed reference rather than recomputed per
+  // cut. That is exact, not an approximation: at cut T every weight carries the
+  // same extra factor 0.5^((T-reference)/H), which cancels in the ratio. So the
+  // running accumulation below still yields the value /me/spectrum would have
+  // reported at each cut.
+  const reference = new Date()
   type Event = { t: number; weight: number; value: number }
   const events: Event[] = [
     ...ownPosts.rows.map((r) => ({
       t: new Date(r.created_at).getTime(),
-      weight: POST_WEIGHT,
+      weight: decayedWeight(POST_WEIGHT, r.created_at, reference),
       value: Number(r.value),
     })),
     ...[...postVotes.rows, ...articleVotes.rows].map((r) => ({
       t: new Date(r.created_at).getTime(),
-      weight: VOTE_WEIGHT,
-      value: r.direction === 'up' ? Number(r.lean) : 1 - Number(r.lean),
+      weight: decayedWeight(VOTE_WEIGHT, r.created_at, reference),
+      value: voteValue(String(r.direction), Number(r.lean)),
     })),
   ].sort((a, b) => a.t - b.t)
 

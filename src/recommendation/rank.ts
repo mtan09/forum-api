@@ -68,7 +68,11 @@ function quality(candidate: RecommendationCandidate): number {
 }
 
 function perspective(mode: FeedMode, user: number, item: number | null): number {
-  if (item == null) return mode === 'random' ? 0.6 : 0.35
+  // Unknown lean is neutral, not bad. Every article carries a lean (source_lean
+  // always backfills), so a penalty here only ever lands on posts — 40% of which
+  // are unclassified. Scoring them below a merely-mismatched article made the
+  // scorer's own coverage gap into a ranking penalty.
+  if (item == null) return mode === 'random' ? 0.6 : 0.5
   const userCentered = Math.abs(user - 0.5) <= 0.05
   const itemCentered = Math.abs(item - 0.5) <= 0.05
   if (mode === 'random') return 0.5
@@ -132,10 +136,16 @@ export function rankCandidates(input: {
       novelty: candidate.recentlySeen ? 0 : 1,
       exploration: deterministicNoise(seed, candidate),
     }
+    // Posts have no outlet, so `source` is not a signal they can ever earn —
+    // scoring both kinds out of the full weight mass charged posts for the
+    // absence. An article scoring 0 on source is a measurement ("this reader
+    // ignores that outlet"); a post scoring 0 is not applicable. Divide by the
+    // mass each kind can actually reach.
+    const applicable = candidate.kind === 'post' ? 1 - weights.source : 1
     const score = Object.entries(weights).reduce(
       (sum, [key, weight]) => sum + signals[key as keyof typeof signals] * weight,
       0
-    )
+    ) / applicable
     return {
       ...candidate,
       score,

@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { query } from '../db'
 import { articleSocialFields, postSocialFields } from '../lib/content-social'
 import {
+  POST_WEIGHT,
+  VOTE_WEIGHT,
+  spectrumPosition,
+  voteValue,
+  type SpectrumEvent,
+} from '../lib/spectrum'
+import {
   type CandidateKind,
   type ContentPreference,
   type FeedMode,
@@ -75,34 +82,40 @@ function eventWeight(eventType: string, dwellMs: number | null): number {
   return 0
 }
 
-async function loadSpectrum(userId: string): Promise<number> {
+// The same placement the profile shows. Shares lib/spectrum.ts with
+// /users/me/spectrum so the feed and the profile can never disagree.
+async function loadSpectrum(userId: string, asOf: Date): Promise<number> {
   const [ownPosts, postVotes, articleVotes] = await Promise.all([
-    query('SELECT position FROM posts WHERE user_id = $1 AND position IS NOT NULL', [userId]),
     query(
-      `SELECT v.direction, p.position AS lean
+      'SELECT position, created_at FROM posts WHERE user_id = $1 AND position IS NOT NULL',
+      [userId]
+    ),
+    query(
+      `SELECT v.direction, p.position AS lean, v.created_at
        FROM votes v JOIN posts p ON p.id = v.post_id
        WHERE v.user_id = $1 AND p.user_id <> $1 AND p.position IS NOT NULL`,
       [userId]
     ),
     query(
-      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean
+      `SELECT v.direction, COALESCE(a.political_lean, a.source_lean) AS lean, v.created_at
        FROM article_votes v JOIN articles a ON a.id = v.article_id
        WHERE v.user_id = $1 AND COALESCE(a.political_lean, a.source_lean) IS NOT NULL`,
       [userId]
     ),
   ])
-  let sum = 0
-  let weight = 0
-  for (const row of ownPosts.rows) {
-    sum += Number(row.position) * 3
-    weight += 3
-  }
-  for (const row of [...postVotes.rows, ...articleVotes.rows]) {
-    const lean = Number(row.lean)
-    sum += row.direction === 'up' ? lean : 1 - lean
-    weight += 1
-  }
-  return weight > 0 ? sum / weight : 0.5
+  const events: SpectrumEvent[] = [
+    ...ownPosts.rows.map((row) => ({
+      at: new Date(String(row.created_at)),
+      weight: POST_WEIGHT,
+      value: Number(row.position),
+    })),
+    ...[...postVotes.rows, ...articleVotes.rows].map((row) => ({
+      at: new Date(String(row.created_at)),
+      weight: VOTE_WEIGHT,
+      value: voteValue(String(row.direction), Number(row.lean)),
+    })),
+  ]
+  return spectrumPosition(events, asOf)
 }
 
 async function loadProfile(userId: string, snapshot: Date): Promise<{
@@ -148,7 +161,7 @@ async function loadProfile(userId: string, snapshot: Date): Promise<{
        LIMIT 240`,
       [userId, snapshot]
     ),
-    loadSpectrum(userId),
+    loadSpectrum(userId, snapshot),
     query(
       `SELECT lower(a.source) AS source,
               sum(CASE
@@ -296,7 +309,10 @@ async function loadPostCandidates(
      ) followed_repost ON TRUE
      LEFT JOIN LATERAL (
        SELECT count(*) FILTER (WHERE event_type = 'impression') AS impressions,
-              count(*) FILTER (WHERE event_type IN ('open', 'outbound_open')) AS opens,
+              -- Only 'open': posts have nowhere outbound to go and emit zero
+              -- outbound_open events, so counting both inflated article openRate
+              -- against identical real engagement.
+              count(*) FILTER (WHERE event_type = 'open') AS opens,
               avg(dwell_ms) FILTER (WHERE event_type = 'dwell') AS average_dwell_ms
        FROM feed_events fe
        WHERE fe.item_type = 'post' AND fe.item_id = p.id
@@ -382,7 +398,10 @@ async function loadArticleCandidates(
      ) followed_repost ON TRUE
      LEFT JOIN LATERAL (
        SELECT count(*) FILTER (WHERE event_type = 'impression') AS impressions,
-              count(*) FILTER (WHERE event_type IN ('open', 'outbound_open')) AS opens,
+              -- Only 'open': posts have nowhere outbound to go and emit zero
+              -- outbound_open events, so counting both inflated article openRate
+              -- against identical real engagement.
+              count(*) FILTER (WHERE event_type = 'open') AS opens,
               avg(dwell_ms) FILTER (WHERE event_type = 'dwell') AS average_dwell_ms
        FROM feed_events fe
        WHERE fe.item_type = 'article' AND fe.item_id = a.id
