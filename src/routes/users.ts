@@ -8,6 +8,7 @@ import {
 import { requireAuth } from '../middleware/auth'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
+import { FOLLOW_REQUESTS_PATH, userPath } from '../lib/notification-routes'
 import type { AppEnv } from '../types'
 import { articleSocialFields, postSocialFields } from '../lib/content-social'
 import {
@@ -676,7 +677,7 @@ users.post('/follow-requests/:followerId/accept', requireAuth, async (c) => {
   notify(result.rows[0].follower_id, 'follows', {
     title: 'Follow request accepted',
     body: `${me.rows[0]?.username ?? 'This account'} accepted your follow request.`,
-    data: { url: `/user/${c.get('userId')}` },
+    data: { url: userPath(c.get('userId')) },
   })
   return c.json({ ok: true, follow_status: 'accepted' })
 })
@@ -829,7 +830,7 @@ users.post('/:id/follow', requireAuth, async (c) => {
     body: `${actor.rows[0]?.username ?? 'Someone'} ${
       status === 'pending' ? 'requested to follow you.' : 'followed you.'
     }`,
-    data: { url: status === 'pending' ? '/follow-requests' : `/user/${me}` },
+    data: { url: status === 'pending' ? FOLLOW_REQUESTS_PATH : userPath(me) },
   })
   return c.json({ ok: true, follow_status: inserted.rows[0].status }, 201)
 })

@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { notify } from '../lib/push'
+import { commentPath, postPath } from '../lib/notification-routes'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
@@ -233,7 +234,7 @@ comments.post('/', requireAuth, rateLimit({ name: 'createComment', windowMs: 60 
         notify(ownerId, 'replies', {
           title: `${commenter} replied to your comment`,
           body: preview,
-          data: { url: postId ? `/post/${postId}` : articleId ? `/article/${articleId}` : `/debate/${debateId}` },
+          data: { url: commentPath({ postId, articleId, debateId }) },
         })
       }
     } else if (postId) {
@@ -243,7 +244,7 @@ comments.post('/', requireAuth, rateLimit({ name: 'createComment', windowMs: 60 
         notify(ownerId, 'replies', {
           title: `${commenter} commented on your post`,
           body: preview,
-          data: { url: `/post/${postId}` },
+          data: { url: postPath(postId) },
         })
       }
     }

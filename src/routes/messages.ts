@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import pool, { query } from '../db'
 import { notify } from '../lib/push'
+import { dmPath } from '../lib/notification-routes'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
@@ -296,7 +297,7 @@ messages.post(
         body: content
           ? content.length > 120 ? `${content.slice(0, 117)}...` : content
           : requestedKind === 'post' ? 'Shared a post' : 'Shared an article',
-        data: { url: `/dm/${me}` },
+        data: { url: dmPath(me) },
       })
       return c.json({
         conversation_id: conversationId,

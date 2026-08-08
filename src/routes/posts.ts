@@ -4,6 +4,7 @@ import { normalizeHashtags } from '../lib/hashtags'
 import { matchTopic } from '../ingest/topics'
 import { moderateText, moderationFailure } from '../lib/moderation'
 import { notify } from '../lib/push'
+import { postPath } from '../lib/notification-routes'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import { scorePost } from '../scoring/score'
@@ -257,7 +258,7 @@ posts.post('/:id/vote', requireAuth, async (c) => {
         notify(row.owner_id, 'upvotes', {
           title: 'Your post got an upvote',
           body: `${row.voter} upvoted your post.`,
-          data: { url: `/post/${postId}`, post_id: postId },
+          data: { url: postPath(postId), post_id: postId },
         })
       }
     }

@@ -1,5 +1,6 @@
 import { query } from '../db'
 import { notificationEmail, sendEmail } from './email'
+import { postPath } from './notification-routes'
 import { captureException, captureMessage } from './sentry'
 
 // Server-side push via Expo's push service. Tokens come from the app
@@ -144,9 +145,7 @@ export async function flushEmailDigests(limit = 50): Promise<number> {
     const message = notificationEmail(
       subject,
       `Your post received ${row.upvote_count} new upvote${row.upvote_count === 1 ? '' : 's'}.`,
-      process.env.WEB_APP_URL
-        ? `${process.env.WEB_APP_URL.replace(/\/$/, '')}/post/${row.post_id}`
-        : undefined
+      notificationLink({ title: subject, body: '', data: { url: postPath(row.post_id) } })
     )
     try {
       await sendEmail({ to: row.email, ...message })

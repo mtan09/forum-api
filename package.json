@@ -22,6 +22,7 @@
     "setup": "node scripts/setup.mjs",
     "account:release": "tsx scripts/create-release-account.ts",
     "harden:demo": "tsx scripts/harden-demo-accounts.ts",
+    "notify:test": "tsx scripts/send-test-notification.ts",
     "demo:activity": "tsx src/demo/run.ts",
     "demo:cleanup": "tsx scripts/cleanup-demo-accounts.ts",
     "migrate:release": "tsx scripts/apply-release-migration.ts",
