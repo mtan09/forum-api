@@ -61,14 +61,65 @@ npm run audit:posts       # read-only before/after harness
 neutral post is worse than leaving it unplaced. `audit:posts` reports
 `neutral_false_placement_rate`, which must stay 0.
 
-**`src/scoring/evaluation-corpus.ts` cannot validate new scoring rules.** It
-reports 100% directional accuracy because it was written alongside the rules it
-tests. `generated_demo_direction.rate` is the one non-self-referential metric —
-it compares placements against the authoring persona's known lean.
+### The post scorer is a three-stage pipeline (`claims-4.0.0`)
 
-Current state and open design questions: `docs/post-scoring-investigation.md`.
-Post coverage is 40% unclassified; the fix is a larger design question, and that
-document records what was tried, what was rejected, and why.
+`scorePost` runs claim extraction → coalition mapping → calibration:
+
+| stage | file | holds politics? |
+|---|---|---|
+| A · what does the author want | `claims.ts` (+ `stances.ts` phrase library) | no |
+| B · which side is that | `direction.ts`, `story-context.ts` | **yes — only here** |
+| C · where on the scale | `score.ts` | no |
+
+**`direction.ts` is the only file in the scorer holding a political judgement.**
+Topics are named as the quantity being increased (`gun-regulation`,
+`gun-rights`), which is what lets "ban assault weapons" read as *more*
+gun-regulation without per-domain exceptions. Polarity is a field on the claim,
+so "I oppose cutting Medicaid" flips rather than being discarded. `contested` is
+a real answer for issues whose mapping has moved — tariffs, platform speech,
+antitrust, AI.
+
+Framing vocabulary splits in two. **Naming terms** ("estate tax", "Affordable
+Care Act") are used by both coalitions and can only intensify a placement, never
+create one — treating them as placement signals is what scored "the Affordable
+Care Act should be repealed" left of centre. **Epithets** ("woke", "big oil")
+are pejorative, so reaching for one is itself the alignment and does place a
+post.
+
+`story-context.ts` resolves claims about named people from article headlines per
+story, refreshed by ingest, and the resolved map is written into
+`position_signals` so `rescore:posts` replays the judgement made at score time
+rather than re-deriving against a newer news cycle.
+
+**Every unplaced post now records why** — `no-claim`, `contested`,
+`unmapped-topic`, `unmapped-actor`. `audit:posts` reports the breakdown. The
+first two are correct outcomes; the last two are coverage gaps worth shrinking.
+
+### Two deferred pieces of work — read before touching the scorer
+
+**1. There is still no way to prove a scoring change is an improvement.**
+`src/scoring/evaluation-corpus.ts` reports near-100% because it was written
+alongside the rules it tests, and it will bless a change that makes things
+worse. `generated_demo_direction.rate` is less circular but is *also*
+contaminated: demo posts the old scorer could not classify were rejected at
+write time and never published, so the surviving corpus is selected to suit
+`stance-3.0.0`. Measured on it, `claims-4.0.0` scores 0.656 against the old
+0.688 — which is not evidence either way.
+
+**A hand-labelled holdout set is the prerequisite for any further tuning.**
+Until it exists, do not claim an accuracy improvement, and do not tune against
+`evaluation-corpus.ts` — that is how the current overfitting happened. Deferred
+deliberately, 2026-08-08.
+
+**2. The demo generator has not been adapted to the new scorer.**
+`createPost` (`src/demo/activity.ts`) rejects a directional persona's post
+unless `scorePost` already places it correctly, and it calls `scorePost` without
+story context. Posts about named people therefore fail the gate more often than
+they should, wasting generation. The gate also means the published corpus can
+never reveal a scorer gap. Deferred deliberately, 2026-08-08.
+
+Background on how the scorer got here, what was tried and rejected:
+`docs/post-scoring-investigation.md`.
 
 ## Spectrum
 
@@ -83,16 +134,73 @@ denominator alike — so a user who does nothing has a placement that never move
 A floor breaks that and makes the number drift with no user action. There is a
 test asserting this; do not "fix" it by adding a minimum weight.
 
+## Content volume is a launch artifact, not a product property
+
+Production today is a review environment. **31 of 36 accounts are scheduled
+demo personas**, and they author almost everything:
+
+| all time | persona | real |
+|---|---|---|
+| Posts | 172 | 5 |
+| Comments | 2,042 | 1 |
+| Votes | 3,053 | 1 |
+
+Against that, ingest adds ~900–1,250 articles/day — **11,972 articles vs 96
+posts over the last 14 days, roughly 1:125.**
+
+That ratio is produced by a cron job. `forum-demo-activity` runs every 10
+minutes and paces each persona to two posts per three-day rotation
+(`demoPersonaPostsOnDay`, `src/demo/activity.ts`), which caps the community at
+~20–21 posts/day no matter what. Articles are uncapped. **The gap measures the
+demo schedule, not user behaviour.**
+
+### Build for the opposite ratio
+
+The product vision is a large userbase where posts **equal or exceed** articles
+in both volume and engagement. Design for that, not for today's numbers:
+
+- **Don't tune ranking to compensate.** No content-type quotas, no post boosts,
+  no "articles are drowning posts" fixes. Posts lose today because there are 96
+  of them; that self-corrects. Structural asymmetries are worth fixing (and
+  have been — see `## Recommendation feed`); volume is not an asymmetry.
+- **Don't reject a feature because community volume is low today.** "There
+  wouldn't be enough posts to fill it" is a statement about August 2026, not
+  about the product. Judge community features on whether they work at parity.
+- **Do assume posts scale like articles.** Any query, index, pagination
+  strategy, or feed assembly path that is comfortable at 96 posts/14d must hold
+  at five figures. Article-side code already handles that volume — match it
+  rather than writing a simpler post-side version.
+- **Do keep the UI honest at both ends.** Layouts and empty states have to read
+  well in a post-sparse feed *and* a post-dominant one.
+
+### Never evaluate against demo data
+
+**Filter on the `demo_personas` join, not `is_demo_generated`.** The flag only
+marks rows the activity cron wrote — 84 of 172 posts and 1,779 of 2,042
+comments. The seeded showcase corpus is persona-authored but unflagged, so the
+flag silently leaves half the synthetic posts in:
+
+```sql
+LEFT JOIN demo_personas dp ON dp.user_id = x.user_id   -- dp.user_id IS NULL = real
+```
+
+Any measurement of ranking quality, engagement, retention, or feed composition
+**must exclude them**, or it is measuring the generator. With real engagement at
+one comment and one vote total, an unfiltered metric is ~99.9% synthetic.
+
+This applies to reasoning as much as to SQL: "posts get few upvotes" is not
+evidence about posts.
+
 ## Recommendation feed
 
 `src/recommendation/` — `service.ts` loads candidates and the profile,
 `rank.ts` scores and diversifies.
 
 Posts and articles compete in one pool with no content-type quota. Posts
-currently lose mostly because there are ~144 of them against ~12k articles from
-the last 14 days, which is a volume artifact that self-corrects — **freshness,
-novelty, the diversify pass, the weight tables, and the candidate pool sizes
-were left alone on purpose.** Don't "fix" them without new evidence.
+currently lose mostly on volume, which is a launch artifact that self-corrects
+— see the section above. **Freshness, novelty, the diversify pass, the weight
+tables, and the candidate pool sizes were left alone on purpose.** Don't "fix"
+them without new evidence.
 
 Structural asymmetries that were real have been fixed: each kind is scored
 against the weight mass it can actually reach (posts can never earn `source`),

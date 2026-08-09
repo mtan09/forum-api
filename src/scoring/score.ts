@@ -17,7 +17,9 @@
 // ============================================================
 
 import { extractFeatures, type TextFeatures } from './features'
-import { detectStances, type StanceHit } from './stances'
+import { detectClaims, netDirection, type Claim } from './claims'
+import { resolveTopic, type Side } from './direction'
+import { resolveActor, type StoryContext } from './story-context'
 
 // Bump on ANY change to lexicons, weights, or thresholds, then run
 // `npm run rescore` so stored scores stay comparable.
@@ -27,8 +29,14 @@ import { detectStances, type StanceHit } from './stances'
 //        ontology; text with no directional evidence is left unclassified
 // 3.0.0: posts add compositional policy rules plus a deterministic, local
 //        prototype fallback and retain evidence/method receipts for each hit
+// 4.0.0: posts become a three-stage pipeline — claim extraction (claims.ts),
+//        coalition mapping (direction.ts + story-context.ts), then
+//        calibration. Direction is no longer welded into each matcher, so
+//        "I oppose X" flips instead of being discarded, framing vocabulary
+//        can no longer set a direction on its own, and every unplaced post
+//        records why it was unplaced.
 export const ARTICLE_SCORER_VERSION = 'stance-2.0.0'
-export const POST_SCORER_VERSION = 'stance-3.0.0'
+export const POST_SCORER_VERSION = 'claims-4.0.0'
 // Backward-compatible export used by post-scoring scripts and tests.
 export const SCORER_VERSION = POST_SCORER_VERSION
 
@@ -43,11 +51,20 @@ export type ArticleScore = {
   scorer_version: string
 }
 
+/** Why a post was left unplaced. The first three are correct and permanent;
+ *  the last two are coverage gaps, and separating them is the point. */
+export type NullReason =
+  | 'no-claim'        // no position stated — observation, question, refusal
+  | 'contested'       // deliberate: the left/right mapping has genuinely moved
+  | 'unmapped-topic'  // real ask, topic absent from the table
+  | 'unmapped-actor'  // claim about a person the headlines don't disambiguate
+
 export type PostScore = {
   position: number | null    // null = no directional evidence, not "centrist"
   confidence: number
   signals: string[]
   scorer_version: string
+  null_reason?: NullReason
 }
 
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n))
@@ -126,20 +143,6 @@ function describeHits(prefix: 'left' | 'right' | 'loaded', hits: TextFeatures['l
     .map((h) => `${prefix}:"${h.term}"×${h.count}`)
 }
 
-function describeStances(hits: StanceHit[]): string[] {
-  return hits.flatMap((hit) => [
-    `stance-${hit.side}:"${hit.issue} · ${hit.label}"×1`,
-    `stance-meta:${JSON.stringify({
-      side: hit.side,
-      issue: hit.issue,
-      position: hit.label,
-      method: hit.method,
-      confidence: Number(hit.confidence.toFixed(2)),
-      evidence: hit.evidence,
-    })}`,
-  ])
-}
-
 export function scoreArticle(input: {
   title: string
   content: string
@@ -192,51 +195,143 @@ export function scoreArticle(input: {
 }
 
 // --- Posts ----------------------------------------------------------
-// No outlet prior exists for a user post, so the text carries all the
-// weight. Partisan framing captures word choice; policy stances capture
-// propositions expressed without slogans. Text without directional evidence
-// remains unclassified instead of being mislabeled as centrist.
-export function scorePost(content: string): PostScore {
+// Three stages. Stage A (claims.ts) says what the author wants, with no
+// politics in it. Stage B (direction.ts for topics, story-context.ts for
+// named people) says which coalition wants that. Stage C, below, is
+// arithmetic.
+//
+// Posts get their own constants. The article path reaches full strength at
+// six framing hits, which a 40-word post cannot do — one hit yielded ±0.05
+// and landed exactly on the centre/right band boundary.
+
+/** Claims needed for full strength. Two, not the article path's six. */
+const FULL_STRENGTH_CLAIMS = 2
+/** How far resolved claims can move the position. */
+const MAX_CLAIM_SHIFT = 0.28
+/**
+ * Framing vocabulary is an intensifier, never a placement. It marks whose
+ * vocabulary the author is using, which inverts the moment someone argues
+ * against a thing they named neutrally — "the Affordable Care Act should be
+ * repealed" used to score left purely on the name.
+ */
+const MAX_FRAMING_BOOST = 0.06
+const FRAMING_FULL_STRENGTH_POST = 2
+
+function describeClaims(claims: Claim[], resolved: Map<Claim, Side>): string[] {
+  return claims.flatMap((claim) => {
+    const side = resolved.get(claim)
+    const net = netDirection(claim)
+    return [
+      `claim:"${claim.topic} · ${net}"×1`,
+      `claim-meta:${JSON.stringify({
+        kind: claim.kind,
+        topic: claim.topic,
+        ...(claim.target ? { target: claim.target } : {}),
+        stated: claim.direction,
+        polarity: claim.polarity,
+        net,
+        side: side ?? null,
+        method: claim.source ?? claim.method,
+        confidence: Number(claim.confidence.toFixed(2)),
+        evidence: claim.evidence,
+      })}`,
+    ]
+  })
+}
+
+export function scorePost(content: string, story?: StoryContext | null): PostScore {
   const f = extractFeatures(content)
-  const framing = textSignal(f)
-  const stances = detectStances(content)
-  const stanceLeft = stances
-    .filter((hit) => hit.side === 'left')
-    .reduce((sum, hit) => sum + hit.weight, 0)
-  const stanceRight = stances
-    .filter((hit) => hit.side === 'right')
-    .reduce((sum, hit) => sum + hit.weight, 0)
-  const stanceEvidence = stanceLeft + stanceRight
-  const stanceNet = stanceEvidence > 0
-    ? (stanceRight - stanceLeft) / stanceEvidence
-    : 0
-  const stanceStrength = Math.min(stanceEvidence / 4, 1)
-  const stanceConfidence = stances.length > 0
-    ? stances.reduce((sum, hit) => sum + hit.confidence, 0) / stances.length
-    : 0
 
-  // Framing is a softer signal than an explicit policy stance. The combined
-  // movement is capped so even highly partisan language stays on the scale.
-  const shift = Math.max(-0.45, Math.min(0.45,
-    framing.net * framing.strength * 0.30 +
-    stanceNet * stanceStrength * 0.35
+  // -- Stage A ---------------------------------------------------------
+  const claims = detectClaims(content)
+
+  // -- Stage B ---------------------------------------------------------
+  const resolved = new Map<Claim, Side>()
+  const reasons: NullReason[] = []
+  let contestedWeight = 0
+  let resolvedWeight = 0
+  for (const claim of claims) {
+    const outcome = claim.kind === 'actor'
+      ? resolveActor(claim.topic, claim.polarity, story)
+      : resolveTopic(claim.topic, netDirection(claim))
+    if (outcome.side) {
+      resolved.set(claim, outcome.side)
+      resolvedWeight = Math.max(resolvedWeight, claim.weight)
+    } else {
+      reasons.push(outcome.reason)
+      if (outcome.reason === 'contested') {
+        contestedWeight = Math.max(contestedWeight, claim.weight)
+      }
+    }
+  }
+
+  // A contested claim suppresses placement when it is the post's dominant
+  // one. "Tariffs on Chinese steel protect American workers" also trips a
+  // worker-protection rule; placing it left on that secondary signal is the
+  // original defect in miniature — reading a coalition off wording while
+  // ignoring the position actually being argued. Ties suppress, because a
+  // wrong placement costs more than a blank one.
+  if (contestedWeight >= resolvedWeight && contestedWeight > 0) resolved.clear()
+
+  // -- Stage C ---------------------------------------------------------
+  let left = 0
+  let right = 0
+  let confidenceSum = 0
+  for (const [claim, side] of resolved) {
+    if (side === 'left') left += claim.weight
+    else right += claim.weight
+    confidenceSum += claim.confidence
+  }
+  const claimEvidence = left + right
+  const claimNet = claimEvidence > 0 ? (right - left) / claimEvidence : 0
+  const claimStrength = Math.min(claimEvidence / (FULL_STRENGTH_CLAIMS * 1.8), 1)
+  const claimConfidence = resolved.size > 0 ? confidenceSum / resolved.size : 0
+
+  const framingEvidence = f.leftCount + f.rightCount
+  const framingNet = framingEvidence > 0
+    ? (f.rightCount - f.leftCount) / framingEvidence
+    : 0
+  const framingStrength = Math.min(framingEvidence / FRAMING_FULL_STRENGTH_POST, 1)
+
+  // Framing only participates once a claim has established a placement.
+  const placed = resolved.size > 0
+  const shift = Math.max(-0.36, Math.min(0.36,
+    claimNet * claimStrength * MAX_CLAIM_SHIFT +
+    (placed ? framingNet * framingStrength * MAX_FRAMING_BOOST : 0)
   ))
-  const evidence = f.leftCount + f.rightCount + stanceEvidence
 
-  const position = evidence > 0 ? clamp01(0.5 + shift) : null
+  const position = placed ? clamp01(0.5 + shift) : null
+
+  // The reason a post is blank is the diagnostic that did not exist before:
+  // "recognised nothing" and "recognised it but has no mapping" used to be
+  // indistinguishable, so there was no way to know where effort should go.
+  const nullReason: NullReason | undefined = placed
+    ? undefined
+    : reasons.find((r) => r === 'contested')
+      ?? reasons.find((r) => r === 'unmapped-actor')
+      ?? reasons.find((r) => r === 'unmapped-topic')
+      ?? 'no-claim'
+
   const confidence = clamp01(
-    0.1 +
-    0.25 * framing.strength +
-    0.4 * stanceStrength * (0.7 + 0.3 * stanceConfidence) +
+    0.12 +
+    0.48 * claimStrength * (0.7 + 0.3 * claimConfidence) +
+    0.12 * (placed ? framingStrength : 0) +
     0.15 * Math.min(f.wordCount / 120, 1) +
     0.1 * Math.min(f.politicalCount / 3, 1)
   )
 
   const signals = [
     `scorer:${POST_SCORER_VERSION}`,
-    'classifier:hybrid-local',
+    'classifier:claims-pipeline',
     `confidence:${confidence.toFixed(2)}`,
-    ...describeStances(stances),
+    ...(nullReason ? [`null-reason:${nullReason}`] : []),
+    // Story mappings are time-stamped evidence, not timeless rules. Recording
+    // the cluster and date is what lets rescore replay the judgement made at
+    // score time instead of re-deriving against a newer news cycle.
+    ...(story && claims.some((c) => c.kind === 'actor')
+      ? [`story:${JSON.stringify({ cluster: story.clusterKey, asOf: story.asOf, supports: story.supports })}`]
+      : []),
+    ...describeClaims(claims, resolved),
     ...describeHits('left', f.leftHits),
     ...describeHits('right', f.rightHits),
     ...describeHits('loaded', f.loadedHits),
@@ -247,5 +342,6 @@ export function scorePost(content: string): PostScore {
     confidence: Number(confidence.toFixed(3)),
     signals,
     scorer_version: POST_SCORER_VERSION,
+    ...(nullReason ? { null_reason: nullReason } : {}),
   }
 }

@@ -8,6 +8,7 @@ import { postPath } from '../lib/notification-routes'
 import { requireAuth } from '../middleware/auth'
 import { rateLimit } from '../middleware/rateLimit'
 import { scorePost } from '../scoring/score'
+import { loadStoryContext } from '../scoring/story-context'
 import { semanticEmbedding } from '../recommendation/semantic'
 import { postSocialFields } from '../lib/content-social'
 import type { AppEnv } from '../types'
@@ -177,7 +178,11 @@ posts.post('/', requireAuth, rateLimit({ name: 'createPost', windowMs: 60 * 60_0
   }
 
   const hashtags = normalizeHashtags(body?.hashtags, content)
-  const score = scorePost(content)
+  // A claim about a named person ("I support Blanche's confirmation") resolves
+  // only against the story it refers to, so the coalition map is loaded here
+  // and recorded in the score's receipts. Null when the post matches no live
+  // story, which leaves such claims unresolved rather than guessed.
+  const score = scorePost(content, await loadStoryContext(content))
   const recommendationText = `${content} ${quoteGrounding} ${hashtags.join(' ')}`.trim()
   const topic = await matchTopic(recommendationText)
 

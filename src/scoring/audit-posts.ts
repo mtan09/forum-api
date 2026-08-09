@@ -7,6 +7,7 @@ import pool, { query } from '../db'
 import { demoPerspective } from '../demo/activity'
 import { POST_SCORING_EVALUATION } from './evaluation-corpus'
 import { POST_SCORER_VERSION, scorePost } from './score'
+import { loadStoryContext } from './story-context'
 
 type Band = 'left' | 'center' | 'right' | 'unclassified'
 
@@ -63,23 +64,45 @@ async function main() {
   const posts = rows as PostRow[]
   const stored = emptyCounts()
   const proposed = emptyCounts()
+  // Why each blank post is blank. 'no-claim', 'contested' and an explicit
+  // refusal are correct outcomes; the two 'unmapped' reasons are coverage
+  // gaps. Before this split every blank looked identical, so there was no way
+  // to tell a working scorer from a missing rule.
+  const nullReasons: Record<string, number> = {}
   let newlyClassified = 0
   let newlyUnclassified = 0
   let changedBand = 0
   let demoDirectional = 0
   let demoDirectionMatches = 0
 
+  // Actor claims need the story they refer to. Resolving per post mirrors what
+  // the write path does, so the audit measures the scorer as it actually runs
+  // rather than a version with the entity layer switched off.
+  const stories = new Map<string, Awaited<ReturnType<typeof loadStoryContext>>>()
+  for (const post of posts) {
+    const content = post.content ?? ''
+    if (!stories.has(content)) stories.set(content, await loadStoryContext(content))
+  }
+
   const details = posts.map((post) => {
-    const score = scorePost(post.content ?? '')
+    const score = scorePost(post.content ?? '', stories.get(post.content ?? ''))
     const currentBand = band(post.position == null ? null : Number(post.position))
     const proposedBand = band(score.position)
     stored[currentBand]++
     proposed[proposedBand]++
+    if (score.position == null) {
+      const reason = score.null_reason ?? 'unknown'
+      nullReasons[reason] = (nullReasons[reason] ?? 0) + 1
+    }
     if (currentBand === 'unclassified' && proposedBand !== 'unclassified') newlyClassified++
     if (currentBand !== 'unclassified' && proposedBand === 'unclassified') newlyUnclassified++
     if (currentBand !== proposedBand && currentBand !== 'unclassified' && proposedBand !== 'unclassified') changedBand++
 
-    if (post.is_demo_generated && post.persona_lean != null) {
+    // Persona authorship, not `is_demo_generated`. The flag only marks rows the
+    // activity cron wrote (84 of 172 posts); the seeded showcase corpus is
+    // persona-authored but unflagged, and gating on the flag shrinks this
+    // metric's denominator to a third of the available evidence.
+    if (post.persona_lean != null) {
       const expected = demoPerspective(Number(post.persona_lean))
       if (expected !== 'center') {
         demoDirectional++
@@ -107,6 +130,7 @@ async function main() {
     stored,
     proposed,
     transitions: { newly_classified: newlyClassified, newly_unclassified: newlyUnclassified, changed_band: changedBand },
+    null_reasons: nullReasons,
     generated_demo_direction: {
       directional_posts: demoDirectional,
       matches: demoDirectionMatches,

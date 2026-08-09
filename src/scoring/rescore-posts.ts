@@ -5,14 +5,52 @@
 import 'dotenv/config'
 import pool, { query } from '../db'
 import { POST_SCORER_VERSION, scorePost } from './score'
+import { loadStoryContext, type StoryContext } from './story-context'
 
-type PostRow = { id: string; content: string | null }
+type PostRow = { id: string; content: string | null; position_signals: string[] | null }
+
+/**
+ * Recover the story coalition map recorded when the post was first scored.
+ *
+ * Re-deriving it here would silently rewrite history: cluster state changes
+ * hourly, so a post scored during the Blanche confirmation would be re-judged
+ * against whatever happens to be in the news on the day the rescore runs. The
+ * story layer is time-stamped evidence, not a timeless rule — a rescore
+ * replays it and recomputes only the parts that come from committed tables.
+ */
+function replayStory(signals: string[] | null): StoryContext | null {
+  const raw = (signals ?? []).find((s) => s.startsWith('story:'))
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw.slice('story:'.length))
+    return {
+      clusterKey: String(parsed.cluster ?? ''),
+      storyTitle: '',
+      asOf: String(parsed.asOf ?? ''),
+      supports: parsed.supports ?? {},
+    }
+  } catch {
+    return null
+  }
+}
 
 async function main() {
   const apply = process.argv.includes('--apply')
-  const result = await query('SELECT id, content FROM posts ORDER BY created_at, id')
+  const result = await query(
+    'SELECT id, content, position_signals FROM posts ORDER BY created_at, id'
+  )
   const rows = result.rows as PostRow[]
-  const scores = rows.map((post) => ({ id: post.id, score: scorePost(post.content ?? '') }))
+  const scores: { id: string; score: ReturnType<typeof scorePost> }[] = []
+  for (const post of rows) {
+    // Replay a recorded judgement; derive one only where none exists. Posts
+    // scored before this scorer carry no story context at all, so replay alone
+    // would leave every claim about a named person permanently unresolved —
+    // but re-deriving one that was already recorded would rewrite history
+    // against a newer news cycle.
+    const story = replayStory(post.position_signals)
+      ?? await loadStoryContext(post.content ?? '')
+    scores.push({ id: post.id, score: scorePost(post.content ?? '', story) })
+  }
   const classified = scores.filter((entry) => entry.score.position != null).length
 
   if (!apply) {

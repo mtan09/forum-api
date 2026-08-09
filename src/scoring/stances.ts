@@ -1,44 +1,66 @@
-// Deterministic policy-stance ontology for user posts.
+// Named policy positions — the phrase library for stage A.
 //
-// The framing lexicon detects partisan word choice. These rules detect the
-// proposition a writer is advancing, so natural-language policy arguments can
-// be placed even when they avoid slogans. Each rule is deliberately narrow,
-// auditable, and versioned with the scorer. Rules describe current US partisan
-// alignment; they are not judgments about whether a position is correct.
+// These rules recognise a specific argument by its wording, where the generic
+// verb-plus-topic template in claims.ts would miss it or read it backwards.
+// They are stage A only: a rule says WHICH POSITION was expressed, never which
+// coalition holds it. That judgement lives in direction.ts and only there.
+//
+// Each rule previously carried `side: 'left' | 'right'` inline, with two
+// consequences worth remembering. Revising a coalition judgement meant editing
+// rules one at a time across the file; and a rule that already knew its answer
+// had nowhere to represent disagreement, so the old guard discarded any match
+// whose clause contained "oppose" and every rule here worked only when the
+// author agreed with it. Carrying `topic` + `direction` and letting polarity
+// flip at resolution fixes both.
 
-export type StanceSide = 'left' | 'right'
+import {
+  clauses as splitClauses,
+  isAttributed,
+  normalize,
+  polarityOf,
+  snippet,
+  EXPLICIT_NO_POSITION,
+  type Polarity,
+} from './matching'
+
+export type Direction = 'more' | 'less'
 
 export type StanceHit = {
   issue: string
-  side: StanceSide
+  /** Quantity being asserted. Resolved against direction.ts. */
+  topic: string
+  /** What the rule's wording asserts about that quantity. */
+  direction: Direction
+  /** Whether the author is for or against it. */
+  polarity: Polarity
   label: string
   weight: number
-  method: 'pattern' | 'compositional' | 'prototype' | 'context'
+  method: 'pattern' | 'compositional' | 'context'
   confidence: number
   evidence: string
 }
 
-type StanceRule = Omit<StanceHit, 'method' | 'confidence' | 'evidence'> & {
+type RuleBase = Omit<StanceHit, 'method' | 'confidence' | 'evidence' | 'polarity'>
+
+type StanceRule = RuleBase & {
   patterns: RegExp[]
   excludes?: RegExp[]
 }
 
-type CompositionalRule = Omit<StanceHit, 'method' | 'confidence' | 'evidence'> & {
+type CompositionalRule = RuleBase & {
   subjects: RegExp[]
   predicates: RegExp[]
   excludes?: RegExp[]
 }
 
-type ContextRule = Omit<StanceHit, 'method' | 'confidence' | 'evidence'> & {
+type ContextRule = RuleBase & {
   patterns: RegExp[]
 }
-
-import { detectSemanticStances } from './semantic-stances'
 
 const RULES: StanceRule[] = [
   // Foreign policy and presidential war powers
   {
-    issue: 'foreign policy', side: 'left', weight: 2,
+    issue: 'foreign policy', topic: 'war-powers-constraint', direction: 'more', weight: 2,
     label: 'war requires congressional authorization',
     patterns: [
       /\bcongress(?:\s+\w+){0,5}\s+(?:has not|hasn't|never)\s+voted\b/i,
@@ -50,7 +72,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'foreign policy', side: 'left', weight: 2,
+    issue: 'foreign policy', topic: 'war-powers-constraint', direction: 'more', weight: 2,
     label: 'military intervention should end',
     patterns: [
       /\bbring (?:our |the )?(?:troops|soldiers|service members) home\b/i,
@@ -62,7 +84,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'foreign policy', side: 'right', weight: 2,
+    issue: 'foreign policy', topic: 'military-force', direction: 'more', weight: 2,
     label: 'military strength and deterrence',
     patterns: [
       /\bpeace through strength\b/i,
@@ -79,7 +101,7 @@ const RULES: StanceRule[] = [
 
   // Immigration
   {
-    issue: 'immigration', side: 'left', weight: 2,
+    issue: 'immigration', topic: 'immigration-openness', direction: 'more', weight: 2,
     label: 'legal status and humane immigration pathways',
     patterns: [
       /\bpath(?:way)? to (?:citizenship|legal status|permanent status)\b/i,
@@ -92,7 +114,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'immigration', side: 'right', weight: 2,
+    issue: 'immigration', topic: 'immigration-enforcement', direction: 'more', weight: 2,
     label: 'stricter border enforcement',
     patterns: [
       /\b(?:country|nation)(?:\s+\w+){0,5}\s+control (?:its |the )?borders?\b/i,
@@ -107,7 +129,7 @@ const RULES: StanceRule[] = [
 
   // Work, wages, and organized labor
   {
-    issue: 'labor', side: 'left', weight: 2,
+    issue: 'labor', topic: 'labor-power', direction: 'more', weight: 2,
     label: 'stronger wages and collective bargaining',
     patterns: [
       /\b(?:raise|increase|higher) (?:the )?(?:federal )?minimum wage\b/i,
@@ -123,7 +145,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'labor', side: 'right', weight: 2,
+    issue: 'labor', topic: 'labor-power', direction: 'less', weight: 2,
     label: 'less regulation of wages and unions',
     patterns: [
       /\bright[- ]to[- ]work\b/i,
@@ -136,7 +158,7 @@ const RULES: StanceRule[] = [
 
   // Health care
   {
-    issue: 'health care', side: 'left', weight: 2,
+    issue: 'health care', topic: 'healthcare-provision', direction: 'more', weight: 2,
     label: 'greater public access and insurance accountability',
     patterns: [
       /\bmedicare for all\b/i,
@@ -149,7 +171,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'health care', side: 'right', weight: 2,
+    issue: 'health care', topic: 'healthcare-provision', direction: 'less', weight: 2,
     label: 'market-led health care',
     patterns: [
       /\bgovernment[- ]run health ?care\b/i,
@@ -161,7 +183,7 @@ const RULES: StanceRule[] = [
 
   // Climate and energy
   {
-    issue: 'climate', side: 'left', weight: 2,
+    issue: 'climate', topic: 'climate-action', direction: 'more', weight: 2,
     label: 'climate action and clean-energy transition',
     patterns: [
       /\bclimate risk (?:is|has|keeps|will|hits?|hitting)\b/i,
@@ -172,7 +194,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'energy', side: 'right', weight: 2,
+    issue: 'energy', topic: 'fossil-production', direction: 'more', weight: 2,
     label: 'expand domestic energy production',
     patterns: [
       /\b(?:drill|produce) more (?:oil|gas|energy)\b/i,
@@ -185,7 +207,7 @@ const RULES: StanceRule[] = [
 
   // Elections and governing institutions
   {
-    issue: 'voting', side: 'left', weight: 2,
+    issue: 'voting', topic: 'voting-access', direction: 'more', weight: 2,
     label: 'fewer barriers to voting',
     patterns: [
       /\bvoter id(?:\s+\w+){0,10}\s+(?:cost|burden|DMV|disenfranchis)\b/i,
@@ -197,7 +219,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'voting', side: 'right', weight: 2,
+    issue: 'voting', topic: 'voting-restrictions', direction: 'more', weight: 2,
     label: 'stricter election safeguards',
     patterns: [
       /\b(?:require|support|adopt) (?:strict )?voter id\b/i,
@@ -209,7 +231,7 @@ const RULES: StanceRule[] = [
 
   // Education, reproductive policy, and firearms
   {
-    issue: 'education', side: 'right', weight: 2,
+    issue: 'education', topic: 'school-choice', direction: 'more', weight: 2,
     label: 'school choice and parental control',
     patterns: [
       /\bschool choice(?:\s+\w+){0,8}\s+(?:works?|wins?|gives?|lets?|allows?)\b/i,
@@ -220,7 +242,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'education', side: 'left', weight: 2,
+    issue: 'education', topic: 'public-education-funding', direction: 'more', weight: 2,
     label: 'stronger public-school investment',
     patterns: [
       /\b(?:fund|invest in) public schools?\b/i,
@@ -229,7 +251,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'abortion', side: 'left', weight: 2,
+    issue: 'abortion', topic: 'abortion-access', direction: 'more', weight: 2,
     label: 'protect abortion and reproductive access',
     patterns: [
       /\b(?:protect|expand|restore) (?:abortion|reproductive) (?:access|rights|freedom|care)\b/i,
@@ -238,7 +260,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'abortion', side: 'right', weight: 2,
+    issue: 'abortion', topic: 'abortion-access', direction: 'less', weight: 2,
     label: 'restrict abortion and protect fetal life',
     patterns: [
       /\b(?:ban|restrict|limit) abortion\b/i,
@@ -247,7 +269,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'guns', side: 'left', weight: 2,
+    issue: 'guns', topic: 'gun-regulation', direction: 'more', weight: 2,
     label: 'stronger gun-safety laws',
     patterns: [
       /\b(?:pass|support|strengthen) (?:gun safety|gun control) (?:legislation|laws?|measures?)\b/i,
@@ -257,7 +279,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'guns', side: 'right', weight: 2,
+    issue: 'guns', topic: 'gun-rights', direction: 'more', weight: 2,
     label: 'protect gun ownership and resist new restrictions',
     patterns: [
       /\b(?:protect|defend) (?:gun|second amendment) rights\b/i,
@@ -268,7 +290,7 @@ const RULES: StanceRule[] = [
 
   // Public safety
   {
-    issue: 'policing', side: 'left', weight: 2,
+    issue: 'policing', topic: 'police-accountability', direction: 'more', weight: 2,
     label: 'police accountability and reform',
     patterns: [
       /\bpolice accountability\b/i,
@@ -278,7 +300,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'policing', side: 'right', weight: 2,
+    issue: 'policing', topic: 'police-enforcement', direction: 'more', weight: 2,
     label: 'stronger support for law enforcement',
     patterns: [
       /\b(?:support|respect|fund) (?:the )?(?:police|cops|law enforcement)\b/i,
@@ -290,7 +312,7 @@ const RULES: StanceRule[] = [
 
   // Fiscal policy and regulation
   {
-    issue: 'fiscal policy', side: 'left', weight: 2,
+    issue: 'fiscal policy', topic: 'taxes-on-high-earners', direction: 'more', weight: 2,
     label: 'more progressive taxes and public investment',
     patterns: [
       /\b(?:raise|increase) taxes? on (?:the )?(?:wealthy|rich|billionaires?|corporations?)\b/i,
@@ -299,7 +321,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'fiscal policy', side: 'right', weight: 2,
+    issue: 'fiscal policy', topic: 'government-spending', direction: 'less', weight: 2,
     label: 'lower spending, taxes, or regulation',
     patterns: [
       /\b(?:cut|reduce) (?:government |federal )?spending\b/i,
@@ -312,7 +334,7 @@ const RULES: StanceRule[] = [
 
   // Housing and the courts
   {
-    issue: 'housing', side: 'left', weight: 2,
+    issue: 'housing', topic: 'tenant-protection', direction: 'more', weight: 2,
     label: 'greater housing affordability and tenant protection',
     patterns: [
       /\bhousing is a human right\b/i,
@@ -324,7 +346,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'courts', side: 'left', weight: 2,
+    issue: 'courts', topic: 'court-reform', direction: 'more', weight: 2,
     label: 'reform the Supreme Court',
     patterns: [
       /\bsupreme court term limits?\b/i,
@@ -333,7 +355,7 @@ const RULES: StanceRule[] = [
     ],
   },
   {
-    issue: 'veterans', side: 'left', weight: 1.5,
+    issue: 'veterans', topic: 'veterans-support', direction: 'more', weight: 1.5,
     label: 'greater public support for veterans and benefits',
     patterns: [
       /\b(?:fund|budget for|guarantee|expand)(?:\s+\w+){0,8}\s+(?:VA care|veterans? care|veterans? benefits|lifelong care)\b/i,
@@ -348,7 +370,7 @@ const RULES: StanceRule[] = [
 // person is not itself a policy stance.
 const COMPOSITIONAL_RULES: CompositionalRule[] = [
   {
-    issue: 'labor', side: 'left', weight: 2,
+    issue: 'labor', topic: 'labor-power', direction: 'more', weight: 2,
     label: 'stronger worker and union protections',
     subjects: [/\b(?:union|organized labor|workers?|apprenticeship|labor standards?)\b/i],
     predicates: [
@@ -358,7 +380,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     excludes: [/\b(?:oppose|reject|end|ban) (?:the )?(?:union|labor|worker) (?:mandate|requirement|protection)/i],
   },
   {
-    issue: 'labor', side: 'right', weight: 2,
+    issue: 'labor', topic: 'labor-power', direction: 'less', weight: 2,
     label: 'fewer labor mandates on employers',
     subjects: [/\b(?:union|labor|minimum wage|employers?|business(?:es)?)\b/i],
     predicates: [
@@ -367,7 +389,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'public health', side: 'left', weight: 2,
+    issue: 'public health', topic: 'healthcare-provision', direction: 'more', weight: 2,
     label: 'greater public-health investment',
     subjects: [/\b(?:public health|pandemic|ventilation|contact tracing|county health|health coverage)\b/i],
     predicates: [
@@ -376,7 +398,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'public health', side: 'right', weight: 2,
+    issue: 'public health', topic: 'healthcare-provision', direction: 'less', weight: 2,
     label: 'fewer centralized health mandates',
     subjects: [/\b(?:public health|pandemic|vaccine|mask|health agenc(?:y|ies))\b/i],
     predicates: [
@@ -385,7 +407,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'technology', side: 'left', weight: 2,
+    issue: 'technology', topic: 'tech-antitrust', direction: 'more', weight: 2,
     label: 'stronger technology-platform regulation',
     subjects: [/\b(?:big tech|technology companies|social media|artificial intelligence|AI|antitrust|data privacy)\b/i],
     predicates: [
@@ -397,7 +419,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'technology', side: 'right', weight: 2,
+    issue: 'technology', topic: 'ai-regulation', direction: 'less', weight: 2,
     label: 'fewer technology mandates and speech controls',
     subjects: [/\b(?:big tech|technology companies|social media|artificial intelligence|AI|online speech)\b/i],
     predicates: [
@@ -406,7 +428,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'housing', side: 'right', weight: 2,
+    issue: 'housing', topic: 'business-regulation', direction: 'less', weight: 2,
     label: 'fewer housing and development restrictions',
     subjects: [/\b(?:housing|zoning|rent control|developers?|homebuilding)\b/i],
     predicates: [
@@ -415,7 +437,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'transportation', side: 'left', weight: 1.5,
+    issue: 'transportation', topic: 'public-transit', direction: 'more', weight: 1.5,
     label: 'greater public-transit investment',
     subjects: [/\b(?:public transit|transit access|bus service|rail service)\b/i],
     predicates: [
@@ -424,7 +446,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
     ],
   },
   {
-    issue: 'civil rights', side: 'right', weight: 2,
+    issue: 'civil rights', topic: 'religious-liberty', direction: 'more', weight: 2,
     label: 'greater religious and associational freedom',
     subjects: [/\b(?:religious liberty|religious freedom|conscience|compelled speech|free association)\b/i],
     predicates: [
@@ -441,7 +463,7 @@ const COMPOSITIONAL_RULES: CompositionalRule[] = [
 // enough. Receipts label this evidence separately from direct policy matches.
 const CONTEXT_RULES: ContextRule[] = [
   {
-    issue: 'political alignment', side: 'left', weight: 1.25,
+    issue: 'political alignment', topic: 'republican-coalition-approval', direction: 'less', weight: 1.25,
     label: 'criticism of Republican political power',
     patterns: [
       /\bRepublicans?(?:\s+\w+){0,10}\s+(?:diversion|abuse|politiciz(?:e|ed|ing)|refus(?:e|ed|al)|fail(?:ed|ure)?|protecting power)\b/i,
@@ -449,7 +471,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'political alignment', side: 'right', weight: 1.25,
+    issue: 'political alignment', topic: 'democratic-coalition-approval', direction: 'less', weight: 1.25,
     label: 'criticism of Democratic or progressive institutions',
     patterns: [
       /\bDemocrats?(?:\s+\w+){0,12}\s+(?:refus(?:e|ed|al)|dodg(?:e|ed|ing)|claiming we should believe|protecting careers?|will not answer|won't answer)\b/i,
@@ -457,7 +479,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'economic power', side: 'left', weight: 1.25,
+    issue: 'economic power', topic: 'labor-power', direction: 'more', weight: 1.25,
     label: 'ordinary people and workers need protection from concentrated power',
     patterns: [
       /\bdefend(?:ing)? ordinary people(?:['’]s)? rights?[\s\S]{0,100}\bpower (?:gets|is) abused\b/i,
@@ -465,7 +487,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'taxpayer restraint', side: 'right', weight: 1.25,
+    issue: 'taxpayer restraint', topic: 'government-spending', direction: 'less', weight: 1.25,
     label: 'opposition to politicized government spending',
     patterns: [
       /\b(?:do not|don't) want (?:my|our) tax dollars funding(?:\s+\w+){0,8}\s+(?:political payback|partisan|weaponiz)/i,
@@ -473,7 +495,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'education', side: 'right', weight: 1.25,
+    issue: 'education', topic: 'school-choice', direction: 'more', weight: 1.25,
     label: 'greater parental oversight of institutions',
     patterns: [
       /\bofficials? answer to families\b/i,
@@ -482,7 +504,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'public safety', side: 'right', weight: 1.1,
+    issue: 'public safety', topic: 'police-enforcement', direction: 'more', weight: 1.1,
     label: 'victim protection and swift enforcement',
     patterns: [
       /\bprotect victims?[\s\S]{0,100}\b(?:leadership decides fast|decide fast|immediate consequences)\b/i,
@@ -490,7 +512,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'energy', side: 'right', weight: 1.25,
+    issue: 'energy', topic: 'fossil-production', direction: 'more', weight: 1.25,
     label: 'domestic production, jobs, and energy reliability',
     patterns: [
       /\benergy (?:workers?|jobs?)(?:\s+\w+){0,14}\s+(?:domestic production|reliability|energy security)\b/i,
@@ -499,7 +521,7 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'climate', side: 'left', weight: 1.25,
+    issue: 'climate', topic: 'climate-action', direction: 'more', weight: 1.25,
     label: 'public investment in climate resilience and transition',
     patterns: [
       /\bfire management budgets?(?:\s+\w+){0,8}\s+(?:actual|real) lever\b/i,
@@ -510,28 +532,28 @@ const CONTEXT_RULES: ContextRule[] = [
     ],
   },
   {
-    issue: 'voting', side: 'left', weight: 1.1,
+    issue: 'voting', topic: 'voting-access', direction: 'more', weight: 1.1,
     label: 'skepticism of unsupported election-fraud claims',
     patterns: [
       /\belection fraud(?:\s+\w+){0,10}\s+(?:filings?|claims?|cases?)[\s\S]{0,100}\b(?:dismissed|no evidence|unsupported)\b/i,
     ],
   },
   {
-    issue: 'drug enforcement', side: 'left', weight: 1.1,
+    issue: 'drug enforcement', topic: 'harm-reduction', direction: 'more', weight: 1.1,
     label: 'evidence-led enforcement at legal ports of entry',
     patterns: [
       /\bfentanyl(?:\s+\w+){0,12}\s+legal ports? of entry[\s\S]{0,120}\bfund (?:the )?scanners?\b/i,
     ],
   },
   {
-    issue: 'fiscal policy', side: 'right', weight: 1.1,
+    issue: 'fiscal policy', topic: 'government-spending', direction: 'less', weight: 1.1,
     label: 'concern about entitlement solvency',
     patterns: [
       /\bSocial Security(?:\s+\w+){0,10}\s+trust fund cliff[\s\S]{0,120}\bmath (?:does not|doesn't) care\b/i,
     ],
   },
   {
-    issue: 'agriculture', side: 'right', weight: 1.1,
+    issue: 'agriculture', topic: 'government-spending', direction: 'less', weight: 1.1,
     label: 'rural-cost skepticism of farm subsidies',
     patterns: [
       /\bfarm bill[\s\S]{0,120}\bsubsidies[\s\S]{0,120}\binput costs? (?:doubled|rose|increased)\b/i,
@@ -539,55 +561,23 @@ const CONTEXT_RULES: ContextRule[] = [
   },
 ]
 
-function stripQuotes(text: string): string {
-  return text.replace(/["“]([^"“”]{2,600}?)["”]/g, ' ')
-}
-
-const EXPLICIT_NO_POSITION = /\b(?:I|we) (?:have not|haven't|do not|don't) (?:taken|take|have) (?:a |any )?position\b/i
-const OPPOSITION_BEFORE = /\b(?:oppose|reject|against|do not support|don't support|cannot support|can't support)\b/i
-const INDIRECT_ATTRIBUTION = /\b(?:said|says|reported|according to|argued|claims?|called for|wants? to|proposed|announced)\b/i
-const AUTHORIAL_CUE = /\b(?:I|we|our|should|must|need to|support|oppose|reject)\b/i
-
-function beforeMatch(value: string, match: RegExpMatchArray): string {
-  const index = match.index ?? 0
-  const clauseStart = Math.max(
-    value.lastIndexOf('.', index - 1),
-    value.lastIndexOf('?', index - 1),
-    value.lastIndexOf('!', index - 1),
-    value.lastIndexOf(';', index - 1)
-  )
-  return value.slice(clauseStart + 1, index)
-}
-
-function rejectedOrAttributed(value: string, match: RegExpMatchArray): boolean {
-  const prefix = beforeMatch(value, match)
-  if (OPPOSITION_BEFORE.test(prefix)) return true
-  return INDIRECT_ATTRIBUTION.test(prefix) && !AUTHORIAL_CUE.test(prefix)
-}
-
-function snippet(value: string, match: RegExpMatchArray | null): string {
-  if (!match || match.index == null) return value.slice(0, 150).trim()
-  const start = Math.max(0, match.index - 45)
-  const end = Math.min(value.length, match.index + match[0].length + 65)
-  const compact = value.slice(start, end).replace(/\s+/g, ' ').trim()
-  return `${start > 0 ? '…' : ''}${compact}${end < value.length ? '…' : ''}`
-}
-
 function uniqueHits(hits: StanceHit[]): StanceHit[] {
-  const priority = { pattern: 4, compositional: 3, prototype: 2, context: 1 }
-  const byPosition = new Map<string, StanceHit>()
+  const priority = { pattern: 3, compositional: 2, context: 1 }
+  const byTopic = new Map<string, StanceHit>()
   for (const hit of hits) {
-    const key = `${hit.issue}:${hit.side}`
-    const current = byPosition.get(key)
+    // Keyed on topic alone. Two rules asserting opposite directions on the
+    // same quantity are a rule conflict, not evidence of a balanced post —
+    // keep the higher-priority one rather than letting them cancel.
+    const current = byTopic.get(hit.topic)
     if (!current || priority[hit.method] > priority[current.method] || hit.confidence > current.confidence) {
-      byPosition.set(key, hit)
+      byTopic.set(hit.topic, hit)
     }
   }
-  return [...byPosition.values()]
+  return [...byTopic.values()]
 }
 
 export function detectStances(text: string): StanceHit[] {
-  const unquoted = stripQuotes(text.replace(/\s+/g, ' ').trim())
+  const unquoted = normalize(text)
   if (EXPLICIT_NO_POSITION.test(unquoted)) return []
   const hits: StanceHit[] = []
 
@@ -595,29 +585,31 @@ export function detectStances(text: string): StanceHit[] {
     if (excludes?.some((pattern) => pattern.test(unquoted))) continue
     const match = patterns.map((pattern) => unquoted.match(pattern)).find(Boolean) ?? null
     if (!match) continue
-    if (rejectedOrAttributed(unquoted, match)) continue
+    if (isAttributed(unquoted, match)) continue
     hits.push({
       ...base,
+      polarity: polarityOf(unquoted, match),
       method: 'pattern',
       confidence: 0.96,
       evidence: snippet(unquoted, match),
     })
   }
 
-  const clauses = unquoted.split(/(?<=[.!?;])\s+|\s+[—–-]\s+/).filter(Boolean)
+  const clauses = splitClauses(unquoted)
   for (const { subjects, predicates, excludes, ...base } of COMPOSITIONAL_RULES) {
     let matched: { clause: string; predicate: RegExpMatchArray } | null = null
     for (const clause of clauses) {
       if (!subjects.some((subject) => subject.test(clause))) continue
       if (excludes?.some((exclude) => exclude.test(clause))) continue
       const predicate = predicates.map((pattern) => clause.match(pattern)).find(Boolean) ?? null
-      if (!predicate || rejectedOrAttributed(clause, predicate)) continue
+      if (!predicate || isAttributed(clause, predicate)) continue
       matched = { clause, predicate }
       break
     }
     if (!matched) continue
     hits.push({
       ...base,
+      polarity: polarityOf(matched.clause, matched.predicate),
       method: 'compositional',
       confidence: 0.88,
       evidence: snippet(matched.clause, matched.predicate),
@@ -626,15 +618,15 @@ export function detectStances(text: string): StanceHit[] {
 
   for (const { patterns, ...base } of CONTEXT_RULES) {
     const match = patterns.map((pattern) => unquoted.match(pattern)).find(Boolean) ?? null
-    if (!match || rejectedOrAttributed(unquoted, match)) continue
+    if (!match || isAttributed(unquoted, match)) continue
     hits.push({
       ...base,
+      polarity: polarityOf(unquoted, match),
       method: 'context',
       confidence: 0.74,
       evidence: snippet(unquoted, match),
     })
   }
 
-  hits.push(...detectSemanticStances(unquoted))
   return uniqueHits(hits)
 }

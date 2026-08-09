@@ -49,12 +49,47 @@ describe('scorePost', () => {
     expect(result.position).toBeLessThan(0.5)
   })
 
-  it('right-framing vocabulary moves the score right of center', () => {
+  // Naming a statute is not a position: both coalitions use "estate tax" and
+  // "Affordable Care Act", and the author may be about to argue against the
+  // thing they just named. Treating those names as placement signals is what
+  // scored "the Affordable Care Act should be repealed" LEFT of centre.
+  it('does not place a post on policy names alone', () => {
     const result = scorePost(
-      'The death tax punishes family farms while illegal aliens strain the border — Washington ignores both.'
+      'The estate tax and the Affordable Care Act both came up at the town hall last night.'
     )
+    expect(result.position).toBeNull()
+    expect(result.null_reason).toBe('no-claim')
+  })
+
+  it('reads a repeal of a neutrally-named statute as opposing it', () => {
+    const result = scorePost('The Affordable Care Act should be repealed.')
     expect(result.position).not.toBeNull()
-    expect(result.position).toBeGreaterThan(0.5)
+    expect(result.position!).toBeGreaterThan(0.55)
+  })
+
+  // Epithets are the other half of the lexicon and DO place a post. Nobody
+  // reaches for "woke administrators" about their own coalition, so the word
+  // choice is the alignment even when no policy is proposed.
+  it('places a post that only disparages the other coalition', () => {
+    const right = scorePost(
+      'Cancel culture is out of control on campus. Woke administrators police every word.'
+    )
+    expect(right.position).not.toBeNull()
+    expect(right.position!).toBeGreaterThan(0.55)
+
+    const left = scorePost(
+      'The climate crisis will not wait. Big oil keeps blocking progress and buying senators.'
+    )
+    expect(left.position).not.toBeNull()
+    expect(left.position!).toBeLessThan(0.45)
+  })
+
+  it('framing vocabulary still intensifies a position the text states', () => {
+    const plain = scorePost('Congress should abolish the estate tax.')
+    const framed = scorePost('Congress should abolish the death tax and end this assault on job creators.')
+    expect(plain.position).not.toBeNull()
+    expect(framed.position).not.toBeNull()
+    expect(framed.position!).toBeGreaterThan(plain.position!)
   })
 
   it('recognizes a left-aligned war-powers stance without partisan slogans', () => {
@@ -62,9 +97,7 @@ describe('scorePost', () => {
       'Two soldiers are dead. Congress has not voted on any of this. War powers exist for a reason — where is the authorization debate?'
     )
     expect(result.position).toBeLessThan(0.4)
-    expect(result.signals).toContain(
-      'stance-left:"foreign policy · war requires congressional authorization"×1'
-    )
+    expect(result.signals).toContain('claim:"war-powers-constraint · more"×1')
   })
 
   it('recognizes a right-aligned border-enforcement stance without partisan slogans', () => {
@@ -72,9 +105,7 @@ describe('scorePost', () => {
       'A country that cannot control its borders is not a country. We need to enforce the border consistently.'
     )
     expect(result.position).toBeGreaterThan(0.6)
-    expect(result.signals).toContain(
-      'stance-right:"immigration · stricter border enforcement"×1'
-    )
+    expect(result.signals).toContain('claim:"immigration-enforcement · more"×1')
   })
 
   it('recognizes compositional labor language from a natural demo post', () => {
@@ -84,7 +115,7 @@ describe('scorePost', () => {
     expect(result.position).not.toBeNull()
     expect(result.position).toBeLessThan(0.4)
     expect(result.signals.some((signal) =>
-      signal.startsWith('stance-meta:') && signal.includes('compositional')
+      signal.startsWith('claim-meta:') && signal.includes('compositional')
     )).toBe(true)
   })
 
@@ -95,7 +126,7 @@ describe('scorePost', () => {
     expect(result.position).not.toBeNull()
     expect(result.position).toBeLessThan(0.4)
     expect(result.signals.some((signal) =>
-      signal.startsWith('stance-meta:') && signal.includes('prototype')
+      signal.startsWith('claim-meta:') && signal.includes('climate-action')
     )).toBe(true)
   })
 
@@ -114,14 +145,18 @@ describe('scorePost', () => {
     expect(result.position).toBeNull()
   })
 
-  it('does not treat opposition to a left proposal as support for that proposal', () => {
+  // Opposition used to delete the match, so this scored nothing at all. It is
+  // now a polarity flip: the claim is still about labor-power, but the author
+  // wants less of it, which places them right.
+  it('treats opposition to a left proposal as the opposing position', () => {
     const result = scorePost(
       'I oppose the proposal to strengthen union labor standards because employers cannot absorb another mandate.'
     )
-    expect(result.position == null || result.position >= 0.5).toBe(true)
-    expect(result.signals.some((signal) =>
-      signal.startsWith('stance-left:')
-    )).toBe(false)
+    expect(result.position).not.toBeNull()
+    expect(result.position!).toBeGreaterThan(0.55)
+    expect(result.signals.some((s) =>
+      s.startsWith('claim-meta:') && s.includes('"polarity":"against"')
+    )).toBe(true)
   })
 
   it('leaves non-directional institutional accountability questions unclassified', () => {
@@ -136,7 +171,7 @@ describe('scorePost', () => {
       'Strict voter ID states and loose ones have nearly identical turnout. Both parties are fighting over a rounding error.'
     )
     expect(result.position).toBeNull()
-    expect(result.signals.some((signal) => signal.startsWith('stance-right:'))).toBe(false)
+    expect(result.signals.some((signal) => signal.startsWith('claim:"'))).toBe(false)
   })
 
   it('reserves center for genuinely mixed directional evidence', () => {
@@ -144,8 +179,10 @@ describe('scorePost', () => {
       'Congress should secure the border and create a path to citizenship for DACA recipients.'
     )
     expect(result.position).toBe(0.5)
-    expect(result.signals.some((signal) => signal.startsWith('stance-left:'))).toBe(true)
-    expect(result.signals.some((signal) => signal.startsWith('stance-right:'))).toBe(true)
+    // Centre must come from two opposing claims cancelling, never from an
+    // absence of evidence — that is what `null` is for.
+    expect(result.signals.some((s) => s.includes('immigration-enforcement'))).toBe(true)
+    expect(result.signals.some((s) => s.includes('immigration-openness'))).toBe(true)
   })
 
   it.each([
@@ -179,14 +216,27 @@ describe('scorePost', () => {
     expect(result.signals.some((s) => s.startsWith('right:'))).toBe(true)
   })
 
-  it('keeps position and confidence in [0, 1]', () => {
-    const extreme = Array(50).fill('death tax illegal alien radical left').join(' ')
+  it('keeps position and confidence in [0, 1] under piled-up evidence', () => {
+    const extreme = Array(50)
+      .fill('Congress should abolish the death tax and cut corporate taxes.')
+      .join(' ')
     const result = scorePost(extreme)
     expect(result.position).not.toBeNull()
     expect(result.position).toBeGreaterThanOrEqual(0)
     expect(result.position).toBeLessThanOrEqual(1)
     expect(result.confidence).toBeGreaterThanOrEqual(0)
     expect(result.confidence).toBeLessThanOrEqual(1)
+  })
+
+  it('records why an unplaced post is unplaced', () => {
+    expect(scorePost('Wow').null_reason).toBe('no-claim')
+    // Trade has genuinely swapped coalitions, so refusing is the answer.
+    expect(scorePost('We should impose new tariffs on Chinese steel.').null_reason)
+      .toBe('contested')
+    // An actor claim with no story context resolves to nothing, but is
+    // reported separately from "recognised nothing at all".
+    expect(scorePost('I support Blanche’s confirmation.').null_reason)
+      .toBe('unmapped-actor')
   })
 })
 
