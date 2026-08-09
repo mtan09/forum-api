@@ -307,6 +307,9 @@ users.get('/me/notification-prefs', requireAuth, async (c) => {
             COALESCE(p.email_upvotes, FALSE) AS email_upvotes,
             COALESCE(p.email_dms, TRUE) AS email_dms,
             COALESCE(p.email_follows, FALSE) AS email_follows,
+            COALESCE(p.push_daily_brief, FALSE) AS push_daily_brief,
+            COALESCE(p.email_daily_brief, FALSE) AS email_daily_brief,
+            p.timezone,
             COALESCE(p.push_replies, TRUE) AS replies,
             COALESCE(p.push_upvotes, TRUE) AS upvotes,
             COALESCE(p.push_dms, TRUE) AS dms,
@@ -329,6 +332,9 @@ users.get('/me/notification-prefs', requireAuth, async (c) => {
       email_upvotes: false,
       email_dms: true,
       email_follows: false,
+      push_daily_brief: false,
+      email_daily_brief: false,
+      timezone: null,
       replies: true,
       upvotes: true,
       dms: true,
@@ -340,7 +346,7 @@ users.get('/me/notification-prefs', requireAuth, async (c) => {
 users.put('/me/notification-prefs', requireAuth, async (c) => {
   const body = await c.req.json().catch(() => null)
   if (!body) return c.json({ error: 'Invalid body' }, 400)
-  if (body.email_enabled === true) {
+  if (body.email_enabled === true || body.email_daily_brief === true) {
     const verification = await query(
       'SELECT email_verified FROM auth_credentials WHERE user_id = $1',
       [c.get('userId')]
@@ -355,16 +361,26 @@ users.put('/me/notification-prefs', requireAuth, async (c) => {
   const val = (key: string) => (body[key] === undefined ? null : !!body[key])
   const legacy = (event: 'replies' | 'upvotes' | 'dms') =>
     body[`push_${event}`] === undefined ? val(event) : val(`push_${event}`)
+  const timezone = body.timezone === undefined ? null : String(body.timezone).trim()
+  if (timezone) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date())
+    } catch {
+      return c.json({ error: 'A valid IANA timezone is required.' }, 400)
+    }
+  }
   await query(
     `INSERT INTO notification_prefs
        (user_id, push_enabled, email_enabled, replies, upvotes, dms,
         push_replies, push_upvotes, push_dms, push_follows,
-        email_replies, email_upvotes, email_dms, email_follows)
+        email_replies, email_upvotes, email_dms, email_follows,
+        push_daily_brief, email_daily_brief, timezone)
      VALUES
        ($1, COALESCE($2, TRUE), COALESCE($3, FALSE),
         COALESCE($4, TRUE), COALESCE($5, TRUE), COALESCE($6, TRUE),
         COALESCE($4, TRUE), COALESCE($5, TRUE), COALESCE($6, TRUE), COALESCE($7, TRUE),
-        COALESCE($8, TRUE), COALESCE($9, FALSE), COALESCE($10, TRUE), COALESCE($11, FALSE))
+        COALESCE($8, TRUE), COALESCE($9, FALSE), COALESCE($10, TRUE), COALESCE($11, FALSE),
+        COALESCE($12, FALSE), COALESCE($13, FALSE), $14)
      ON CONFLICT (user_id) DO UPDATE SET
        push_enabled = COALESCE($2, notification_prefs.push_enabled),
        email_enabled = COALESCE($3, notification_prefs.email_enabled),
@@ -378,7 +394,10 @@ users.put('/me/notification-prefs', requireAuth, async (c) => {
        email_replies = COALESCE($8, notification_prefs.email_replies),
        email_upvotes = COALESCE($9, notification_prefs.email_upvotes),
        email_dms = COALESCE($10, notification_prefs.email_dms),
-       email_follows = COALESCE($11, notification_prefs.email_follows)`,
+       email_follows = COALESCE($11, notification_prefs.email_follows),
+       push_daily_brief = COALESCE($12, notification_prefs.push_daily_brief),
+       email_daily_brief = COALESCE($13, notification_prefs.email_daily_brief),
+       timezone = COALESCE($14, notification_prefs.timezone)`,
     [
       c.get('userId'),
       val('push_enabled'),
@@ -391,6 +410,9 @@ users.put('/me/notification-prefs', requireAuth, async (c) => {
       val('email_upvotes'),
       val('email_dms'),
       val('email_follows'),
+      val('push_daily_brief'),
+      val('email_daily_brief'),
+      timezone,
     ]
   )
   return c.json({ ok: true })

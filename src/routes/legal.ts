@@ -1,4 +1,6 @@
 import { Hono } from 'hono'
+import { query } from '../db'
+import { verifyDailyBriefUnsubscribeToken } from '../lib/brief-unsubscribe'
 
 // Terms + Privacy served straight from the API, so once the API is deployed
 // these are real public URLs — which is exactly what App Store review asks
@@ -29,6 +31,52 @@ const page = (title: string, body: string) => `<!doctype html>
 ${body}
 <p style="margin-top:40px;opacity:0.6">Questions: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>
 </body></html>`
+
+/**
+ * A valid token means the request is authentic. Whether a prefs row happened
+ * to exist is a separate question — reporting "invalid link" when the row is
+ * simply missing tells a user their unsubscribe failed when it did not, on a
+ * compliance surface. Upsert so the opt-out is recorded either way.
+ */
+const unsubscribeUser = async (token: string) => {
+  const userId = verifyDailyBriefUnsubscribeToken(token)
+  if (!userId) return false
+  await query(
+    `INSERT INTO notification_prefs (user_id, email_daily_brief)
+     VALUES ($1, FALSE)
+     ON CONFLICT (user_id) DO UPDATE SET email_daily_brief = FALSE`,
+    [userId]
+  )
+  return true
+}
+
+legal.get('/unsubscribe-daily-brief', (c) => {
+  const token = c.req.query('token') ?? ''
+  if (!verifyDailyBriefUnsubscribeToken(token)) {
+    return c.html(page('Invalid link', '<p>This unsubscribe link is invalid.</p>'), 400)
+  }
+  return c.html(page('Daily Brief email', `
+    <p>Stop receiving the Daily Brief by email? The briefing will remain available inside forum.</p>
+    <form method="post" action="/legal/unsubscribe-daily-brief?token=${encodeURIComponent(token)}">
+      <button type="submit" style="border:0;border-radius:12px;background:#B647FF;color:white;padding:12px 18px;font-weight:700">Unsubscribe</button>
+    </form>`))
+})
+
+legal.post('/unsubscribe-daily-brief', async (c) => {
+  const token = c.req.query('token') ?? ''
+  // RFC 8058: `List-Unsubscribe-Post: List-Unsubscribe=One-Click` is a header
+  // the SENDER puts on the email. The mail client then POSTs with that string
+  // in the REQUEST BODY, not as a request header — so reading it from the
+  // headers meant this branch never fired for a real Gmail or Yahoo one-click
+  // unsubscribe.
+  const body = await c.req.text().catch(() => '')
+  const oneClick = /(^|&)List-Unsubscribe=One-Click(&|$)/.test(body)
+  const ok = await unsubscribeUser(token)
+  if (oneClick) return ok ? c.body(null, 204) : c.json({ error: 'Invalid unsubscribe token.' }, 400)
+  return ok
+    ? c.html(page('Unsubscribed', '<p>You will no longer receive Daily Brief email. You can turn it back on in forum Settings.</p>'))
+    : c.html(page('Invalid link', '<p>This unsubscribe link is invalid.</p>'), 400)
+})
 
 legal.get('/terms', (c) =>
   c.html(
@@ -72,7 +120,7 @@ legal.get('/privacy', (c) =>
 <h2>What we collect</h2>
 <ul>
   <li><strong>Account:</strong> email address, username, password (stored as a scrypt hash — we can never read it), optional bio and profile images, account privacy setting, and follow requests.</li>
-  <li><strong>Content and activity:</strong> your posts, comments, votes, bookmarks, debate stances, follows, and direct messages.</li>
+  <li><strong>Content and activity:</strong> your posts, comments, votes, bookmarks, debate stances, follows, and direct messages. If you use Daily Brief, forum keeps up to seven editions containing selected existing content references and grouped activity counts.</li>
   <li><strong>Search:</strong> the query you submit is used to return matching topics, posts, and articles. forum does not build a saved account search-history list, and URL query values are removed from server request logs.</li>
   <li><strong>Feed personalization:</strong> interests you choose, items shown in your feed, opens, approximate time visible, outbound publisher opens, and “Not interested” choices. These first-party signals are used to rank and diversify your feed; they are not used for advertising.</li>
   <li><strong>Computed data:</strong> a political-lean placement derived from your posts and votes by a deterministic algorithm. It exists only inside the app and is shown on your profile.</li>
@@ -82,7 +130,7 @@ legal.get('/privacy', (c) =>
 
 <h2>How it's used</h2>
 <ul>
-  <li>To operate the product: showing your content, computing placements, delivering notifications you opted into, and sending account emails (verification, password reset).</li>
+  <li>To operate the product: showing your content, computing placements, preparing the in-app Daily Brief, delivering notifications you opted into, and sending account emails (verification, password reset, optional Daily Brief).</li>
   <li><strong>Recommendations:</strong> forum locally creates numeric topic vectors from posts and article coverage, then combines them with your selected interests and in-app activity. Behavioral profiles are not sent to OpenAI or an advertising network. You can clear selected interests, viewing signals, and “Not interested” choices under Settings → Content → Reset feed personalization.</li>
   <li><strong>forumAI:</strong> if you explicitly allow OpenAI processing, your question, recent conversation context, eligible attributed publisher headlines, forum-generated story metadata, and relevant community-post context may be sent to OpenAI to generate the answer. Publisher article bodies are not stored or sent to OpenAI. Content from publishers with reviewed AI or automation restrictions is excluded from OpenAI context. Locally derived aggregate clustering signals may still help forum identify a covered topic, after which only eligible attributed headlines are supplied to OpenAI. These inputs are not used by forum to build an advertising profile.</li>
   <li><strong>Moderation:</strong> narrow safety rules run on forum's server first. If you explicitly allow OpenAI processing, profile text, posts, comments, direct messages, forumAI prompts, and uploaded images are also sent to OpenAI's moderation service. Signup usernames are checked only by forum's on-server rules. We store decision metadata and a one-way input hash for audit, not rejected raw content.</li>
@@ -104,7 +152,7 @@ legal.get('/privacy', (c) =>
 <p>Infrastructure providers process data on our behalf: application hosting (Railway), database hosting (Neon), public and private image storage (Cloudflare R2), email delivery (Resend), push and build delivery (Expo), crash diagnostics (Sentry), TestFlight distribution (Apple), and AI responses and optional additional safety checks (OpenAI). Each receives only what its function requires. forum requires providers to protect personal data consistently with this policy and applicable privacy obligations and does not authorize them to use forum data for advertising.</p>
 
 <h2>Retention and deletion</h2>
-<p>Data is kept while your account exists. Settings → Delete Account immediately removes your profile, posts, comments, votes, messages, push tokens, and feedback text and metadata. Associated public media and private feedback screenshots are queued for deletion from active storage, retried on failure, and removed within 24 hours. Backups age out on a rolling basis.</p>
+<p>Data is kept while your account exists, except Daily Brief editions, which rotate after seven days. Settings → Delete Account immediately removes your profile, posts, comments, votes, messages, Daily Brief editions, push tokens, and feedback text and metadata. Associated public media and private feedback screenshots are queued for deletion from active storage, retried on failure, and removed within 24 hours. Backups age out on a rolling basis.</p>
 
 <h2>Your rights</h2>
 <p>You can access and edit your profile in-app, export your content by request, and delete everything yourself. Contact us for anything else.</p>

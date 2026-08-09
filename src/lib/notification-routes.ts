@@ -16,6 +16,7 @@ export const userPath = (userId: string) => `/user/${userId}`
 export const dmPath = (senderId: string) => `/dm/${senderId}`
 
 export const FOLLOW_REQUESTS_PATH = '/follow-requests'
+export const briefPath = (briefDate: string) => `/brief/${briefDate}`
 
 /**
  * Where a comment notification points. Replies inherit their parent's target,

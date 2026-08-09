@@ -8,7 +8,7 @@ import { captureException, captureMessage } from './sentry'
 // toggles actually control delivery. All sends are fire-and-forget —
 // notification failures must never fail the triggering request.
 
-export type NotificationKind = 'replies' | 'upvotes' | 'dms' | 'follows'
+export type NotificationKind = 'replies' | 'upvotes' | 'dms' | 'follows' | 'daily_brief'
 
 type PushPayload = {
   title: string
@@ -57,6 +57,42 @@ export async function deliver(
   if (!row) return
 
   if (row.push_enabled && row.push_kind_enabled) {
+    await sendPushToUser(userId, kind, payload)
+  }
+
+  if (!row.email_enabled || !row.email_kind_enabled || !row.email_verified || !row.email) return
+
+  if (kind === 'upvotes' && typeof payload.data?.post_id === 'string') {
+    await query(
+      `INSERT INTO notification_email_digests (user_id, post_id)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id, post_id) DO UPDATE SET
+         upvote_count = notification_email_digests.upvote_count + 1,
+         updated_at = NOW()`,
+      [userId, payload.data.post_id]
+    )
+    return
+  }
+
+  const message = notificationEmail(payload.title, payload.body, notificationLink(payload))
+  await sendEmail({ to: row.email, ...message })
+}
+
+/**
+ * Send a server-authorized push after the caller has applied preference gates.
+ *
+ * Returns how many messages Expo accepted. This function never throws — no
+ * tokens, a non-2xx from Expo, and a rejected ticket are all logged and
+ * swallowed — so a caller that needs to know whether anything actually went
+ * out MUST check the return value. Treating a call as delivered because it
+ * did not throw marks a notification sent that nobody received.
+ */
+export async function sendPushToUser(
+  userId: string,
+  kind: NotificationKind,
+  payload: PushPayload
+): Promise<number> {
+    let accepted = 0
     const tokens = await query('SELECT token FROM push_tokens WHERE user_id = $1', [userId])
     const messages = tokens.rows.map((t) => ({
       to: t.token,
@@ -95,6 +131,7 @@ export async function deliver(
         } else if (ticket.status === 'ok' && ticket.id && batch[idx]?.to) {
           // A successful ticket only means Expo accepted the message. Store
           // its opaque id and check the final APNs/FCM receipt later.
+          accepted++
           await query(
             `INSERT INTO push_receipts (ticket_id, token, user_id, kind)
              VALUES ($1, $2, $3, $4)
@@ -102,29 +139,13 @@ export async function deliver(
             [ticket.id, batch[idx].to, userId, kind]
           )
         } else if (ticket.status === 'ok') {
+          accepted++
           captureMessage('Expo push ticket missing receipt id', 'warning', { kind })
         }
       }) ?? []
       await Promise.all(ticketWrites)
     }
-  }
-
-  if (!row.email_enabled || !row.email_kind_enabled || !row.email_verified || !row.email) return
-
-  if (kind === 'upvotes' && typeof payload.data?.post_id === 'string') {
-    await query(
-      `INSERT INTO notification_email_digests (user_id, post_id)
-       VALUES ($1, $2)
-       ON CONFLICT (user_id, post_id) DO UPDATE SET
-         upvote_count = notification_email_digests.upvote_count + 1,
-         updated_at = NOW()`,
-      [userId, payload.data.post_id]
-    )
-    return
-  }
-
-  const message = notificationEmail(payload.title, payload.body, notificationLink(payload))
-  await sendEmail({ to: row.email, ...message })
+    return accepted
 }
 
 export async function flushEmailDigests(limit = 50): Promise<number> {

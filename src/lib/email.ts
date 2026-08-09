@@ -5,9 +5,14 @@
 // Setup (production): create a free Resend account, verify your sending
 // domain, then set RESEND_API_KEY and EMAIL_FROM in the environment.
 
-type EmailInput = { to: string; subject: string; html: string }
+export type EmailInput = {
+  to: string
+  subject: string
+  html: string
+  headers?: Record<string, string>
+}
 
-export async function sendEmail({ to, subject, html }: EmailInput): Promise<void> {
+export async function sendEmail({ to, subject, html, headers }: EmailInput): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
     if (process.env.NODE_ENV === 'production') {
@@ -37,6 +42,7 @@ export async function sendEmail({ to, subject, html }: EmailInput): Promise<void
       to: [to],
       subject,
       html,
+      ...(headers ? { headers } : {}),
     }),
   })
   if (!res.ok) {

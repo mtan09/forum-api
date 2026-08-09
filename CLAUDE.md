@@ -10,13 +10,14 @@ the sibling repo at `../forum`.
 
 ## Deploying — read this before running `railway up`
 
-The Railway project contains **three services built from this one repo**:
+The Railway project contains **four services built from this one repo**:
 
 | service | role |
 |---|---|
 | `forum-api` | the HTTP API — `api.forumeveryside.com` |
 | `forum-ingest` | cron, hourly — article ingest |
 | `forum-demo-activity` | cron, every 10 min — demo persona activity |
+| `forum-daily-brief` | cron, every 15 min — opted-in Daily Brief delivery and retention |
 
 **This directory is linked to `forum-demo-activity`, not `forum-api`.** A bare
 `railway up` deploys the cron service and silently leaves the API on the old
@@ -214,6 +215,16 @@ all funnelled through `notify()` → `deliver()` in `src/lib/push.ts`. Push and
 email are two outputs of that one path, gated independently by
 `notification_prefs`; upvotes are the exception, accumulating into
 `notification_email_digests` rather than emailing per event.
+
+**`daily_brief` is a fifth kind and does not go through `deliver()`.** It calls
+`sendPushToUser` and `sendEmail` directly from `src/lib/daily-brief-delivery.ts`
+because it needs its own gating columns and per-edition dedupe. That means it
+inherits none of `deliver()`'s gating, and none of the coverage in
+`notification-delivery.test.ts` — both have to be maintained separately.
+`sendPushToUser` is an un-gated primitive: it applies no preference checks and
+**never throws**, returning the number of messages Expo accepted. A caller that
+treats a non-throwing call as delivered will mark notifications sent that
+nobody received.
 
 **Every destination path comes from `src/lib/notification-routes.ts`.** Don't
 inline `` `/post/${id}` `` at a call site again — the client repo's

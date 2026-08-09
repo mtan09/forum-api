@@ -353,8 +353,33 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
   email_replies BOOLEAN NOT NULL DEFAULT TRUE,
   email_upvotes BOOLEAN NOT NULL DEFAULT FALSE,
   email_dms BOOLEAN NOT NULL DEFAULT TRUE,
-  email_follows BOOLEAN NOT NULL DEFAULT FALSE
+  email_follows BOOLEAN NOT NULL DEFAULT FALSE,
+  push_daily_brief BOOLEAN NOT NULL DEFAULT FALSE,
+  email_daily_brief BOOLEAN NOT NULL DEFAULT FALSE,
+  timezone TEXT
 );
+
+CREATE TABLE IF NOT EXISTS daily_briefs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
+  brief_date DATE NOT NULL,
+  timezone TEXT NOT NULL,
+  window_start TIMESTAMPTZ NOT NULL,
+  window_end TIMESTAMPTZ NOT NULL,
+  content JSONB NOT NULL DEFAULT '{}'::jsonb,
+  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  seen_at TIMESTAMPTZ,
+  emailed_at TIMESTAMPTZ,
+  pushed_at TIMESTAMPTZ,
+  email_attempts INTEGER NOT NULL DEFAULT 0,
+  push_attempts INTEGER NOT NULL DEFAULT 0,
+  last_delivery_error TEXT,
+  UNIQUE (user_id, brief_date)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_briefs_user_recent
+  ON daily_briefs (user_id, brief_date DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_briefs_generated
+  ON daily_briefs (generated_at DESC);
 
 CREATE TABLE IF NOT EXISTS moderation_audits (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -454,7 +479,7 @@ CREATE TABLE IF NOT EXISTS push_receipts (
   ticket_id TEXT PRIMARY KEY,
   token TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES userdata(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('replies', 'upvotes', 'dms', 'follows')),
+  kind TEXT NOT NULL CHECK (kind IN ('replies', 'upvotes', 'dms', 'follows', 'daily_brief')),
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '15 minutes',
   last_attempt_at TIMESTAMPTZ,

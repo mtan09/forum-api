@@ -300,6 +300,8 @@ describe('login verification state', () => {
         email: 'reader@example.com',
         email_verified: false,
         password_hash: 'stored-hash',
+        is_admin: true,
+        is_private: false,
         is_banned: false,
         ai_consent_status: 'declined',
         ai_consent_current: false,
@@ -322,9 +324,13 @@ describe('login verification state', () => {
         id: 'user-1',
         email: 'reader@example.com',
         email_verified: false,
+        is_admin: true,
+        is_private: false,
       },
     })
     expect(mocks.poolQuery.mock.calls[0][0]).toContain('a.email_verified')
+    expect(mocks.poolQuery.mock.calls[0][0]).toContain('u.is_admin')
+    expect(mocks.poolQuery.mock.calls[0][0]).toContain('u.is_private')
     expect(mocks.verifyPassword).toHaveBeenCalledWith('secret1', 'stored-hash')
   })
 })

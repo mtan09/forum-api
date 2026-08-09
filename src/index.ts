@@ -20,6 +20,7 @@ import aiRoutes from './routes/ai'
 import authRoutes from './routes/auth'
 import articlesRoutes from './routes/articles'
 import bookmarksRoutes from './routes/bookmarks'
+import briefsRoutes from './routes/briefs'
 import commentsRoutes from './routes/comments'
 import debatesRoutes from './routes/debates'
 import feedbackRoutes from './routes/feedback'
@@ -69,6 +70,7 @@ app.route('/articles', articlesRoutes)
 app.route('/topics',   topicsRoutes)
 app.route('/comments', commentsRoutes)
 app.route('/bookmarks', bookmarksRoutes)
+app.route('/briefs',    briefsRoutes)
 app.route('/debates',  debatesRoutes)
 app.route('/feedback', feedbackRoutes)
 app.route('/feed',     feedRoutes)
