@@ -3,9 +3,18 @@
 Written 2026-08-07 after an investigation into why most posts render without a
 spectrum. Self-contained: no prior session context needed.
 
-**Status: deferred.** Nothing in this document has been implemented. The feed and
-user-spectrum fixes discussed alongside it *were* implemented; this is the part
-that turned out to be a larger design question than a bug fix.
+**Status: superseded 2026-08-08.** The scorer this document analyses,
+`stance-3.0.0`, was replaced by `claims-4.0.0` — a three-stage pipeline
+(claim extraction → coalition mapping → calibration) described in
+`../CLAUDE.md`. All 178 posts were re-scored.
+
+Everything below still describes `stance-3.0.0` and is kept because the
+*analysis* remains the reason the redesign took the shape it did — particularly
+Limitation 3, which became the `contested` mapping value. **Read the sections
+below as history, not as current behaviour.**
+
+What is current: the "Defects in `claims-4.0.0`" section at the end of this
+document.
 
 ---
 
@@ -351,3 +360,94 @@ These reshaped the analysis and should not be re-litigated from scratch.
 - `scorePost` callers, none of which need changing for a rules-only change:
   `routes/posts.ts:179` (post creation), `rescore-posts.ts`, `rescore.ts`,
   `audit-posts.ts`, `demo/activity.ts:475`.
+
+---
+
+# Defects in `claims-4.0.0`
+
+Current as of 2026-08-09. Found by reading real placements on device during
+build 9 testing, not by a test suite — which is itself the point of D3.
+
+## D1 — Opposition expressed as contrastive negation reads as support
+
+**The most serious one.** Two production posts scored **0.78 (right)** while
+arguing the opposite:
+
+```
+Restricting birthright citizenship won't "fix" public health—it's an
+administrative shock that destabilizes families who are already uninsured…
+
+Restricting birthright citizenship isn't a policy tweak—it's an attempt to
+redraw constitutional rights through litigation strategy…
+```
+
+Receipts on both:
+
+```
+claim: immigration-enforcement · more    polarity "for"   → right
+claim: immigration-openness   · less     polarity "for"   → right
+```
+
+Two failures compounding.
+
+**Polarity is blind to subject-position criticism.** `polarityOf` looks for an
+against-cue *before* the match and a disparaging copular predicate *after* it.
+Here the topic phrase is the sentence subject at index 0 — nothing precedes it —
+and the disagreement arrives as contrastive negation: `X won't Y`, `X isn't
+A—it's B`. Neither shape is recognised. The redesign fixed "I oppose cutting
+Medicaid"; it did not fix the much more common form where the thing being
+criticised is the grammatical subject.
+
+**One span is counted as two claims.** "Restricting birthright citizenship"
+matches a PHRASE rule (`immigration-enforcement`, direction `more`) *and* a
+TEMPLATE rule — `birthright citizenship` is also an `immigration-openness` term,
+with "Restricting" as the contracting verb, giving `less`. Both resolve right.
+The dedupe in `detectClaims` keys on `kind:topic`, so two *different* topics
+derived from identical text both survive and their weights add. That is what
+lifts the score from roughly 0.65 to 0.78.
+
+**Why this is worse than an unplaced post.** The scorer's governing principle is
+that leaving text unclassified beats mislabelling a neutral post as centrist.
+Placing a post confidently on the side it argues against is worse than either,
+and `neutral_false_placement_rate` does not measure it — that metric only counts
+neutral text acquiring a placement.
+
+**Deliberately not fixed.** The obvious patch is more patterns: add `won't`, add
+`isn't…it's`. That is exactly the accretion that overfitted `stance-3.0.0`, and
+there is currently no instrument that could tell whether it helped — see D3. Two
+changes worth considering together when there is one:
+
+- treat a topic term in subject position, followed in the same clause by a
+  negated positive-outcome verb or a contrastive `not A but B`, as `against`
+- suppress the template claim when a phrase claim already covers an overlapping
+  span, rather than letting both contribute weight
+
+## D2 — Right-leaning generated posts are rejected more often
+
+Of the 6 demo post jobs the write-time gate rejected on 2026-08-09, **5 were
+right-leaning**. The overall rejection rate did not worsen versus
+`stance-3.0.0` (30.0% against 32.3%), so this is about *which* side fails, not
+how often.
+
+Sample is far too small to act on. If it persists it points at thinner coverage
+for right-side topics in `direction.ts` — plausible, since the topic table was
+written by naming quantities that read naturally as left-side asks
+(`healthcare-provision`, `labor-power`) with right-side positions expressed as
+`less` of them.
+
+Worth re-measuring at a few hundred jobs before touching the table.
+
+## D3 — There is still no way to validate a fix
+
+Unchanged from the original investigation, and now blocking concrete work.
+
+- `evaluation-corpus.ts` reports near-100% because the rules were written from
+  those sentences. It will bless a regression.
+- `generated_demo_direction` is contaminated in a way that is easy to miss: the
+  demo write-gate discards any post the *current* scorer cannot place, so the
+  published corpus is selected to suit whatever scorer produced it. Measured on
+  it, `claims-4.0.0` scores 0.656 against `stance-3.0.0`'s 0.688 — a difference
+  that settles nothing in either direction.
+
+D1 is the first defect that cannot responsibly be fixed without a hand-labelled
+holdout set. Build it before the next scoring change, not after.
