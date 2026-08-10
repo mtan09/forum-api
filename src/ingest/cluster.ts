@@ -32,6 +32,10 @@ const SIM_THRESHOLD = 0.3     // join a cluster at ≥ this similarity to its le
 const MIN_ARTICLES = 3        // a story needs corroboration...
 const MIN_OUTLETS = 2         // ...from more than one outlet
 const MAX_CLUSTERS = 12
+/** How long a debate keeps its story's article membership alive after the
+ *  story stops being hot. Longer than the Floor's own retention so a room is
+ *  never emptied while it is still reachable. */
+const DEBATE_MEMBERSHIP_GRACE_DAYS = 8
 const POST_MATCH_TERMS = 2    // keyword overlaps for a post to count toward a cluster
 
 export type ArticleRow = {
@@ -296,11 +300,34 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
   // Rebuild automatic membership from scratch. Otherwise articles retain
   // old subtopic IDs after clusters change and unrelated coverage gradually
   // accumulates on summary screens.
+  //
+  // Exception: a subtopic that a live debate points at, and that did NOT make
+  // this pass's hot list, keeps its members. Debates are created once at 04:00
+  // and hold a subtopic_id for whatever was hot then; when that story later
+  // drops out of the top MAX_CLUSTERS it would otherwise be wiped and never
+  // reassigned, leaving a Floor room with a title, a volume and summaries but
+  // zero articles. Observed 2026-08-09: the Max Miller room claimed "20 outlets
+  // are covering this story" with nothing attached. The Daily Brief hydrates
+  // story cards off the same join, so it renders "0 outlets · 0 articles" for
+  // the same reason.
+  //
+  // Membership is frozen rather than refreshed, which is the correct reading
+  // for a dated debate: the room shows the coverage that existed when it was
+  // created. Hot clusters are still wiped and reassigned normally, so nothing
+  // accumulates where the original comment was worried about it.
   await query(
     `UPDATE articles SET subtopic_id = NULL
      WHERE subtopic_id IN (
        SELECT id FROM subtopics WHERE cluster_key IS NOT NULL
-     )`
+     )
+     AND subtopic_id NOT IN (
+       SELECT d.subtopic_id FROM debates d
+       JOIN subtopics s ON s.id = d.subtopic_id
+       WHERE d.subtopic_id IS NOT NULL
+         AND d.debate_date >= CURRENT_DATE - $1::int
+         AND NOT (s.cluster_key = ANY($2::text[]))
+     )`,
+    [DEBATE_MEMBERSHIP_GRACE_DAYS, hot.map((h) => h.key)]
   )
 
   const hotTitles: string[] = []

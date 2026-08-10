@@ -115,9 +115,20 @@ deliberately, 2026-08-08.
 **2. The demo generator has not been adapted to the new scorer.**
 `createPost` (`src/demo/activity.ts`) rejects a directional persona's post
 unless `scorePost` already places it correctly, and it calls `scorePost` without
-story context. Posts about named people therefore fail the gate more often than
-they should, wasting generation. The gate also means the published corpus can
-never reveal a scorer gap. Deferred deliberately, 2026-08-08.
+story context — unlike `routes/posts.ts`, which passes it. Each rejection burns
+up to six model generations and throws the text away.
+
+**Measured 2026-08-09, and it contradicts what this section first predicted.**
+The rejection rate did *not* get worse: `stance-3.0.0` rejected 40 of 124 post
+jobs (32.3%), `claims-4.0.0` rejected 6 of 20 (30.0%). Small sample, but the
+concern that entity-heavy posts would fail more often is not showing up. What
+*is* visible: 5 of those 6 rejections were right-leaning posts, which would
+point at thinner right-side coverage in the topic table if it persists.
+
+The gate's real cost is not waste, it is measurement: it guarantees the
+published corpus contains only what the scorer already reads, which is why
+`generated_demo_direction` cannot settle whether a scoring change helped.
+Deferred deliberately, 2026-08-08.
 
 Background on how the scorer got here, what was tried and rejected:
 `docs/post-scoring-investigation.md`.

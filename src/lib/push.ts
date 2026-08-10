@@ -29,9 +29,22 @@ export function notify(userId: string, kind: NotificationKind, payload: PushPayl
   })
 }
 
+let warnedMissingWebAppUrl = false
+
 function notificationLink(payload: PushPayload): string | undefined {
   const base = process.env.WEB_APP_URL?.replace(/\/$/, '')
   const path = typeof payload.data?.url === 'string' ? payload.data.url : null
+  // Omitting beats guessing: a staging deploy with WEB_APP_URL unset would
+  // otherwise mail people links into production. There is a test pinning this.
+  //
+  // But the omission used to be completely silent — no error, no log, no
+  // Sentry event, just every notification email quietly losing its button
+  // while Daily Brief email kept working, because that path has its own
+  // fallback. Say something once per process instead.
+  if (path && !base && !warnedMissingWebAppUrl) {
+    warnedMissingWebAppUrl = true
+    captureMessage('WEB_APP_URL is unset — notification emails are sending without a link', 'warning')
+  }
   return base && path ? `${base}${path.startsWith('/') ? path : `/${path}`}` : undefined
 }
 
