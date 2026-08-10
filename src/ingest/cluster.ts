@@ -321,11 +321,24 @@ export async function clusterAndPublish(): Promise<{ clusters: number; hot: stri
        SELECT id FROM subtopics WHERE cluster_key IS NOT NULL
      )
      AND subtopic_id NOT IN (
-       SELECT d.subtopic_id FROM debates d
-       JOIN subtopics s ON s.id = d.subtopic_id
-       WHERE d.subtopic_id IS NOT NULL
-         AND d.debate_date >= CURRENT_DATE - $1::int
-         AND NOT (s.cluster_key = ANY($2::text[]))
+       SELECT s.id FROM subtopics s
+       WHERE NOT (s.cluster_key = ANY($2::text[]))
+         AND (
+           s.id IN (
+             SELECT d.subtopic_id FROM debates d
+             WHERE d.subtopic_id IS NOT NULL
+               AND d.debate_date >= CURRENT_DATE - $1::int
+           )
+           OR s.id IN (
+             -- Daily Brief editions cite story ids too, and a cited story is
+             -- not always one the Floor picked up. Without this the brief's
+             -- own cards lose their coverage.
+             SELECT (jsonb_array_elements_text(b.content->'story_ids'))::uuid
+             FROM daily_briefs b
+             WHERE b.brief_date >= CURRENT_DATE - $1::int
+               AND jsonb_typeof(b.content->'story_ids') = 'array'
+           )
+         )
      )`,
     [DEBATE_MEMBERSHIP_GRACE_DAYS, hot.map((h) => h.key)]
   )

@@ -21,6 +21,18 @@ export type DailyBriefActivity = {
 type StoredContent = {
   version?: number
   story_ids: string[]
+  /**
+   * Outlet and article counts frozen at generation, keyed by story id.
+   *
+   * A brief is a dated artifact and its numbers have to be dated too. Counting
+   * live at read time drifts twice over: clustering reassigns article
+   * membership every pass, and the counts are scoped to the edition's window,
+   * so a story selected at 07:00 can own no in-window articles by lunchtime and
+   * render "0 outlets · 0 articles" — in an email already sent. Observed
+   * 2026-08-09 on the Supreme Court card, whose subtopic held 58 articles at
+   * the time it displayed zero.
+   */
+  story_stats?: Record<string, { outlets: number; articles: number }>
   post_ids: string[]
   floor_ids: string[]
   recap_ids: string[]
@@ -198,12 +210,15 @@ async function hydrate(row: any): Promise<DailyBrief> {
               count(DISTINCT a.source)::int AS outlet_count,
               count(a.id)::int AS article_count,
               (array_agg(a.media ORDER BY a.published_at DESC) FILTER (WHERE a.media IS NOT NULL))[1] AS media
-       FROM subtopics s JOIN articles a ON a.subtopic_id = s.id AND a.status = 'ready'
-         AND a.published_at >= $2 AND a.published_at < $3
+       -- LEFT JOIN, and lifetime counts as a floor. Editions written before
+       -- story_stats existed have no frozen numbers, and an inner join against
+       -- a churned membership set would drop the row entirely rather than
+       -- merely undercount it.
+       FROM subtopics s LEFT JOIN articles a ON a.subtopic_id = s.id AND a.status = 'ready'
        WHERE s.id = ANY($1::uuid[])
        GROUP BY s.id
        ORDER BY array_position($1::uuid[], s.id)`,
-      [storyIds, row.window_start, row.window_end]) : Promise.resolve({ rows: [] }),
+      [storyIds]) : Promise.resolve({ rows: [] }),
     postIds.length ? query(
       `SELECT p.id, p.content, p.media_url, p.position, p.upvotes, p.commentcount,
               p.created_at, u.id AS user_id, u.username, u.avatar_url, u.is_demo
@@ -237,7 +252,16 @@ async function hydrate(row: any): Promise<DailyBrief> {
     window_end: new Date(row.window_end).toISOString(),
     generated_at: new Date(row.generated_at).toISOString(),
     seen_at: row.seen_at ? new Date(row.seen_at).toISOString() : null,
-    stories: stories.rows,
+    // Frozen counts win. They were computed against the edition's own window
+    // at generation; the lifetime numbers from the query above are only a
+    // fallback for editions written before story_stats existed, where showing
+    // a story's whole history beats showing zero.
+    stories: stories.rows.map((story: any) => {
+      const frozen = content.story_stats?.[String(story.id)]
+      return frozen
+        ? { ...story, outlet_count: frozen.outlets, article_count: frozen.articles }
+        : story
+    }),
     posts: posts.rows,
     floor: floor.rows,
     floor_recap: recap.rows,
@@ -316,9 +340,31 @@ export async function generateDailyBrief(
     ),
     activityFor(userId, windowStart, windowEnd),
   ])
+  const storyIdsForBrief = asIds(stories.rows)
+  // Freeze the counts now, against the same window the stories were selected
+  // on. Recomputing them at read time drifts as clustering churns membership.
+  const statsRows = storyIdsForBrief.length
+    ? (await query(
+        `SELECT s.id,
+                count(DISTINCT a.source)::int AS outlets,
+                count(a.id)::int AS articles
+         FROM subtopics s
+         LEFT JOIN articles a ON a.subtopic_id = s.id AND a.status = 'ready'
+           AND a.published_at >= $2 AND a.published_at < $3
+         WHERE s.id = ANY($1::uuid[])
+         GROUP BY s.id`,
+        [storyIdsForBrief, windowStart, windowEnd]
+      )).rows
+    : []
+  const storyStats: StoredContent['story_stats'] = {}
+  for (const row of statsRows as any[]) {
+    storyStats[String(row.id)] = { outlets: Number(row.outlets), articles: Number(row.articles) }
+  }
+
   const stored: StoredContent = {
     version: DAILY_BRIEF_CONTENT_VERSION,
-    story_ids: asIds(stories.rows),
+    story_ids: storyIdsForBrief,
+    story_stats: storyStats,
     post_ids: postsPage.items
       .filter((item) => item.kind === 'post')
       .filter((item) => {
