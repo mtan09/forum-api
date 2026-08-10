@@ -130,10 +130,10 @@ published corpus contains only what the scorer already reads, which is why
 `generated_demo_direction` cannot settle whether a scoring change helped.
 Deferred deliberately, 2026-08-08.
 
-**Full reference: `docs/post-scoring-investigation.md`.** Architecture, every
-stage, the known defects, and a "working on this safely" checklist. Read it
-before changing anything under `src/scoring/` — it is written for a cold reader
-and covers the traps that inverted scores in the past.
+**Full reference: `docs/post-scoring.md`.** Architecture, every stage, the known
+defects, and a "working on this safely" checklist. Read it before changing
+anything under `src/scoring/` — it is written for a cold reader and covers the
+traps that have inverted scores in the past.
 
 ## Spectrum
 
